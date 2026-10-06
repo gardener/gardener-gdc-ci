@@ -1,0 +1,17 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
+aliases:
+  gardener-gdc-ci-reviewers:
+  - AndreasBurger
+  - dilipkumar2k6
+  - HophinKibona
+  - fuzzdota
+  - matthias-horne
+  - cmuuss
+  gardener-gdc-ci-approvers:
+  - AndreasBurger
+  - dilipkumar2k6
+  - HophinKibona
+  - fuzzdota
+  - matthias-horne
+  - cmuuss

@@ -1,0 +1,6 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
+reviewers:
+- gardener-gdc-ci-reviewers
+approvers:
+- gardener-gdc-ci-approvers
