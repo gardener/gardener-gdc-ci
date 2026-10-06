@@ -1,0 +1,213 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+replicaCount: 2
+revisionHistoryLimit: 2
+serviceAccountName: gardenlet
+invalidateServiceAccountToken: true
+enableHealthProbes: true
+image:
+  repository: {{.GardenletImageRepository}}
+  tag: {{.GardenerVersion}}
+  pullPolicy: Always
+resources:
+  requests:
+    cpu: 100m
+    memory: 100Mi
+additionalVolumes: []
+additionalVolumeMounts: []
+env: []
+vpa: false
+config:
+  gardenClientConnection:
+    qps: 100
+    burst: 130
+    bootstrapKubeconfig:
+      name: gardenlet-kubeconfig-bootstrap
+      namespace: garden
+      kubeconfig: |
+        apiVersion: v1
+        kind: Config
+        current-context: gardenlet-bootstrap@default
+        clusters:
+        - cluster:
+            certificate-authority-data: {{.CaData}}
+            server: {{.GardenClusterURL}}
+          name: default
+        contexts:
+        - context:
+            cluster: default
+            user: gardenlet-bootstrap
+          name: gardenlet-bootstrap@default
+        users:
+        - name: gardenlet-bootstrap
+          user:
+            token: 07401b.f395accd246ae52d
+    kubeconfigSecret:
+      name: gardenlet-kubeconfig
+      namespace: garden
+  seedClientConnection:
+    qps: 100
+    burst: 130
+  shootClientConnection:
+    qps: 25
+    burst: 50
+  controllers:
+    backupBucket:
+      concurrentSyncs: 5
+    backupEntry:
+      concurrentSyncs: 5
+    bastion:
+      concurrentSyncs: 5
+    tokenRequestorWorkloadIdentity:
+      concurrentSyncs: 5
+    seed:
+      syncPeriod: 1h
+    seedCare:
+      syncPeriod: 30s
+      conditionThresholds:
+      - type: SeedSystemComponentsHealthy
+        duration: 1m
+    shoot:
+      concurrentSyncs: 20
+      syncPeriod: 1h
+      retryDuration: 12h
+      respectSyncPeriodOverwrite: false
+      reconcileInMaintenanceOnly: false
+    shootCare:
+      concurrentSyncs: 5
+      syncPeriod: 30s
+      staleExtensionHealthChecks:
+        enabled: true
+      managedResourceProgressingThreshold: 1h
+      conditionThresholds:
+      - type: APIServerAvailable
+        duration: 1m
+      - type: ControlPlaneHealthy
+        duration: 1m
+      - type: ObservabilityComponentsHealthy
+        duration: 1m
+      - type: SystemComponentsHealthy
+        duration: 1m
+      - type: EveryNodeReady
+        duration: 5m
+      webhookRemediatorEnabled: false
+    shootState:
+      concurrentSyncs: 5
+      syncPeriod: 6h
+    managedSeed:
+      concurrentSyncs: 5
+      syncPeriod: 1h
+      waitSyncPeriod: 15s
+      syncJitterPeriod: 5m
+      jitterUpdates: false
+    networkPolicy:
+      concurrentSyncs: 5
+    tokenRequestor:
+      concurrentSyncs: 5
+  resources:
+    capacity:
+      shoots: 250
+  leaderElection:
+    leaderElect: true
+    leaseDuration: 15s
+    renewDeadline: 10s
+    retryPeriod: 2s
+    resourceLock: leases
+  logLevel: info
+  logFormat: json
+  server:
+    healthProbes:
+      enable: true
+      port: 2728
+    metrics:
+      port: 2729
+  debugging:
+    enableProfiling: false
+    enableContentionProfiling: false
+  featureGates: {}
+  seedConfig:
+    metadata:
+      annotations:
+          seed.gardener.cloud/ingress-class: nginx-ingress-gardener
+      name: {{.SeedName}}
+    spec:
+      dns:
+        provider:
+          credentialsRef:
+            apiVersion: v1
+            kind: Secret
+            name: gdch-cred
+            namespace: garden
+          type: gdch-dns
+        internal:
+          domain: internal.gdch.{{.ManagedDNSDomainName}}
+          type: gdch-dns
+          credentialsRef:
+            apiVersion: v1
+            kind: Secret
+            name: gdch-cred
+            namespace: garden
+        defaults:
+        - domain: {{.ManagedDNSDomainName}}
+          type: gdch-dns
+          credentialsRef:
+            apiVersion: v1
+            kind: Secret
+            name: gdch-cred
+            namespace: garden
+      backup:
+        provider: gdch
+        providerConfig:
+{{.DualzoneProviderConfig}}
+        credentialsRef:
+          apiVersion: v1
+          kind: Secret
+          name: {{.BackupBucketCredSecret}}
+          namespace: garden
+      ingress:
+        controller:
+          kind: nginx
+        domain: gdch.{{.ManagedDNSDomainName}}
+      networks:
+        ipFamilies:
+        - IPv4
+        pods: {{.SeedPodsCIDR}}
+        services: {{.SeedServicesCIDR}}
+      provider:
+        region: {{.Region}}
+        type: gdch
+      settings:
+        dependencyWatchdog:
+          endpoint:
+            enabled: true
+          probe:
+            enabled: true
+          prober:
+            enabled: true
+          weeder:
+            enabled: true
+        excessCapacityReservation:
+          enabled: true
+        ownerChecks:
+          enabled: true
+        scheduling:
+          visible: true
+        topologyAwareRouting:
+          enabled: false
+        verticalPodAutoscaler:
+          enabled: true
+nodeToleration:
+  defaultNotReadyTolerationSeconds: 60
+  defaultUnreachableTolerationSeconds: 60

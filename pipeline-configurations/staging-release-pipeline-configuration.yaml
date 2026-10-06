@@ -1,0 +1,88 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+gcp:
+  # GKE clusters that hosts the virtual garden clusters to use.
+  gkeClusters:
+    - name: staging-runtime-1
+      zone: us-central1
+      project: dilipkumardk-gardener-lab
+    - name: staging-runtime-2
+      zone: us-central1
+      project: dilipkumardk-gardener-lab
+    - name: staging-runtime-3
+      zone: us-central1
+      project: dilipkumardk-gardener-lab
+    - name: staging-runtime-4
+      zone: us-central1
+      project: dilipkumardk-gardener-lab
+gdc:
+  project: sapbtp
+  org: gdc1
+  region: us-west6
+  zones:
+    - us-west6-a
+    - us-west6-c
+  labDomainURL: staging.gpcdemolabs.com
+  managedDNSDomainName: sap.gardener.gpcdemolabs.com
+  globalAPIURL: https://global-api.gdc1.us-west6-c.staging.gpcdemolabs.com
+  managementAPIURL: https://management-kube.apiserver.gdc1.us-west6-a.staging.gpcdemolabs.com
+  consoleURL: https://console.gdc1.us-west6-a.staging.gpcdemolabs.com
+  harborRegistryURL: gardener-harbor-sapbtp.gdc1.us-west6-a.staging.gpcdemolabs.com/sap-gardener
+  parentPrivateSubnetGroup: release-pipeline-parent-subnet-group
+  parentPublicSubnetGroup: release-pipeline-parent-public-subnet-group
+  dualZoneBucketLocation: async-grover-gonzo
+  userClusters:
+  # Vanilla user clusters that host Shoot clusters to use for remote seed
+  - name: gardener-grover-3
+    zone: us-west6-a
+    project: sapbtp
+  secondaryProject: sap-gardener
+gardener:
+  gardenerVersion: v1.149.3
+  kubernetesVersion: 1.35.0
+  ciliumExtension:
+    helmChartRef: ghcr.io/gardener/gardener-gdc-ci/gardener-extension-networking-cilium:0.1.0
+    version: v1.36.0
+  gardenlinuxExtension:
+    helmChartRef: ghcr.io/gardener/gardener-gdc-ci/gardener-extension-os-gardenlinux:0.1.0
+    version: v0.32.0
+  externalDNSExtension:
+    helmChartRef: ghcr.io/gardener/gardener-gdc-ci/gardener-extension-shoot-dns-service:0.1.0
+    version: v1.84.0
+  csiImages:
+    csiDriver:
+      repository: gardener-harbor-sapbtp.gdc1.us-west6-a.staging.gpcdemolabs.com/sap-gardener/csi-driver-gdch
+      tag: "v0.0.0-gke.36-abb7721"
+    csiProvisioner:
+      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-provisioner
+      tag: "v5.2.0-gke.20"
+    csiAttacher:
+      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-attacher
+      tag: "v4.8.1-gke.10"
+    csiLivenessProbe:
+      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/livenessprobe
+      tag: "v2.9.0-gke.1"
+    csiNodeDriverRegistrar:
+      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-node-driver-registrar
+      tag: "v2.13.0-gke.21"
+    csiSnapshotter:
+      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-snapshotter
+      tag: "v8.2.1-gke.9"
+    csiSnapshotController:
+      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/anthos-baremetal-release/snapshot-controller
+      tag: "v8.2.1-gke.9"
+    csiResizer:
+      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-resizer
+      tag: "v1.13.2-gke.14"

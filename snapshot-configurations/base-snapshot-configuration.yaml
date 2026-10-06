@@ -1,0 +1,97 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Base snapshot configuration for Gardener release pipeline failure capture
+# TODO(b/499060460): This is a starting point, we will need to add more resources to capture
+clusters:
+  - clusterName: "shoot-cluster"
+    targets:
+      - namespace: "kube-system"
+        resources:
+          - apiVersion: "v1"
+            kind: "Pod"
+  - clusterName: "seed-cluster"
+    targets:
+      - namespace: "garden"
+        resources:
+          - apiVersion: "v1"
+            kind: "Pod"
+          - apiVersion: "v1"
+            kind: "Service"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "DNSRecord"
+          - apiVersion: "apps/v1"
+            kind: "Deployment"
+          - apiVersion: "apps/v1"
+            kind: "StatefulSet"
+          - apiVersion: "resources.gardener.cloud/v1alpha1"
+            kind: "ManagedResource"
+          - apiVersion: "v1"
+            kind: "ConfigMap"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "BackupBucket"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "BackupEntry"
+      - matchLabels:
+          gardener.cloud/role: extension
+        resources:
+          - apiVersion: "v1"
+            kind: "Pod"
+          - apiVersion: "v1"
+            kind: "Service"
+          - apiVersion: "apps/v1"
+            kind: "Deployment"
+          - apiVersion: "apps/v1"
+            kind: "StatefulSet"
+          - apiVersion: "v1"
+            kind: "ConfigMap"
+      - matchLabels:
+          gardener.cloud/role: shoot
+        resources:
+          - apiVersion: "v1"
+            kind: "Pod"
+          - apiVersion: "v1"
+            kind: "Service"
+          - apiVersion: "apps/v1"
+            kind: "Deployment"
+          - apiVersion: "apps/v1"
+            kind: "StatefulSet"
+          - apiVersion: "v1"
+            kind: "ConfigMap"
+          - apiVersion: "resources.gardener.cloud/v1alpha1"
+            kind: "ManagedResource"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "Worker"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "ControlPlane"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "Infrastructure"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "Network"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "ContainerRuntime"
+          - apiVersion: "extensions.gardener.cloud/v1alpha1"
+            kind: "OperatingSystemConfig"
+          - apiVersion: "druid.gardener.cloud/v1alpha1"
+            kind: "Etcd"
+  - clusterName: "garden-cluster"
+    targets:
+      - namespace: "garden"
+        resources:
+          - apiVersion: "v1"
+            kind: "Pod"
+          - apiVersion: "core.gardener.cloud/v1beta1"
+            kind: "Seed"
+          - apiVersion: "core.gardener.cloud/v1beta1"
+            kind: "Shoot"

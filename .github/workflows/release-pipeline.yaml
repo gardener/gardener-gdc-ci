@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: 2026 Google LLC
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Gardener GDC Release Pipeline
+
+on:
+  # Run every weeknight (Monday through Friday at 02:00 UTC; no weekend runs)
+  schedule:
+    - cron: '0 2 * * 1-5'
+  # Allow authorized maintainers to trigger on Pull Requests via '/test-release' comment
+  issue_comment:
+    types: [created]
+  # Allow manual trigger by approved Google and SAP maintainers only
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Optional Pull Request number to test (merges main into PR branch and reports check-run on PR)'
+        required: false
+        default: ''
+        type: string
+      extension_gdc_ref:
+        description: 'Git ref (branch/tag/SHA) for gardener/gardener-extension-provider-gdc'
+        required: false
+        default: 'main'
+        type: string
+      mcm_provider_gdc_ref:
+        description: 'Git ref (branch/tag/SHA) for gardener/machine-controller-manager-provider-gdc'
+        required: false
+        default: 'main'
+        type: string
+      external_dns_ref:
+        description: 'Git ref (branch/tag/SHA) for gardener/external-dns-management'
+        required: false
+        default: 'master'
+        type: string
+      cloud_provider_gdc_ref:
+        description: 'Git ref (branch/tag/SHA) for GoogleCloudPlatform/cloud-provider-gdc'
+        required: false
+        default: 'main'
+        type: string
+      virtual_garden_provider:
+        description: 'Cluster provider hosting Virtual Garden'
+        required: false
+        default: 'gke'
+        type: choice
+        options:
+          - gke
+          - gdc
+      skip_conformance:
+        description: 'Skip Sonobuoy CNCF conformance suite (faster validation run)'
+        required: false
+        default: false
+        type: boolean
+      publish_to_public_registry:
+        description: 'Publish certified artifacts to Gardener public registry on success'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+  pages: write
+  id-token: write
+  checks: write
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: gardener-gdc-release-pipeline-${{ inputs.pr_number || github.event.issue.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'issue_comment' || inputs.pr_number != '' }}
+
+jobs:
+  authorize:
+    name: Authorize Trigger (Google & SAP Maintainers)
+    if: >
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/test-release'))
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.auth.outputs.should_run }}
+      pr_number: ${{ steps.auth.outputs.pr_number }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Verify maintainer authorization on manual dispatch or PR comment
+        id: auth
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          source ./scripts/ci-common.sh
+          verify_authorized_maintainer OWNERS_ALIASES
+
+  release-pipeline:
+    name: E2E Release Certification & Promotion
+    needs: authorize
+    if: needs.authorize.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    environment: gdc-staging
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+      EXTENSION_GDC_REF: ${{ inputs.extension_gdc_ref || 'main' }}
+      MCM_PROVIDER_GDC_REF: ${{ inputs.mcm_provider_gdc_ref || 'main' }}
+      EXTERNAL_DNS_REF: ${{ inputs.external_dns_ref || 'master' }}
+      CLOUD_PROVIDER_GDC_REF: ${{ inputs.cloud_provider_gdc_ref || 'main' }}
+      VIRTUAL_GARDEN_PROVIDER: ${{ inputs.virtual_garden_provider || 'gke' }}
+      SKIP_CONFORMANCE: ${{ inputs.skip_conformance || 'false' }}
+      GDC_RELEASE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDC_RELEASE_SERVICE_ACCOUNT_KEY }}
+      GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON: ${{ secrets.GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON }}
+    steps:
+      - name: Checkout gardener-gdc-ci
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Checkout target Pull Request if requested
+        if: env.PR_NUMBER != ''
+        run: |
+          source ./scripts/ci-common.sh
+          checkout_pr_if_requested
+
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Log in to GitHub Container Registry (ghcr.io)
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Authenticate to Google Cloud (GKE Virtual Garden Runtime Clusters & GCS)
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f # v2.1.7
+        with:
+          credentials_json: ${{ secrets.GCP_VIRTUAL_GARDEN_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up Google Cloud SDK & GKE Auth Plugin
+        uses: google-github-actions/setup-gcloud@6189d56e4096ee891640bb02ac264be376592d6a # v2.1.2
+        with:
+          install_components: 'gke-gcloud-auth-plugin'
+
+      - name: Stage 1 - Build & Push Candidate Artifacts to GHCR
+        id: stage_build
+        run: ./scripts/release/1-build_and_push_artifacts.sh
+
+      - name: Stage 2 - Prepare Pipeline Configuration & Bootstrap GDC CLI
+        id: stage_prepare
+        run: ./scripts/release/2-prepare_pipeline_configuration.sh
+
+      - name: Stage 3 - Deploy Gardener (Virtual Garden)
+        id: stage_deploy_garden
+        run: ./scripts/release/3-deploy_gardener.sh
+
+      - name: Stage 4 - Deploy GDC Seed (Gardenlet)
+        id: stage_deploy_seed
+        run: ./scripts/release/4-deploy_seed.sh
+
+      - name: Stage 5 - Provision GDC Shoot Cluster
+        id: stage_deploy_shoot
+        run: ./scripts/release/5-deploy_shoot.sh
+
+      - name: Stage 6 - Run Shoot Functional & Conformance Suites
+        id: stage_test_shoot
+        run: ./scripts/release/6-test_shoot.sh
+
+      - name: Stage 7 - Teardown Gardener Stack (Always)
+        id: stage_teardown
+        if: always()
+        run: ./scripts/release/7-teardown_gardener.sh
+
+      - name: Determine Gardener OCI Registry Parameters
+        id: gardener_params
+        if: success() && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
+        uses: gardener/cc-utils/.github/actions/params@v1
+        with:
+          mode: ${{ needs.authorize.outputs.pr_number != '' && 'snapshot' || 'release' }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Authenticate to Gardener Public Registry (OIDC via gardener/cc-utils)
+        if: success() && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
+        uses: gardener/cc-utils/.github/actions/oci-auth@v1
+        with:
+          oci-image-reference: ${{ steps.gardener_params.outputs.oci-registry }},ghcr.io/gardener
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Stage 8 - Promote Certified Artifacts to Gardener Public Registry
+        id: stage_publish
+        if: success() && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
+        env:
+          PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry }}
+        run: ./scripts/release/8-publish_release_artifacts.sh
+
+      - name: Stage 9 - Update Release Pipeline Dashboard & Summary
+        if: always()
+        env:
+          STAGE_BUILD_STATUS: ${{ steps.stage_build.outcome }}
+          STAGE_DEPLOY_GARDEN_STATUS: ${{ steps.stage_deploy_garden.outcome }}
+          STAGE_DEPLOY_SEED_STATUS: ${{ steps.stage_deploy_seed.outcome }}
+          STAGE_DEPLOY_SHOOT_STATUS: ${{ steps.stage_deploy_shoot.outcome }}
+          STAGE_TEST_SHOOT_STATUS: ${{ steps.stage_test_shoot.outcome }}
+          STAGE_TEARDOWN_STATUS: ${{ steps.stage_teardown.outcome }}
+          STAGE_PUBLISH_STATUS: ${{ steps.stage_publish.outcome }}
+          OVERALL_PIPELINE_STATUS: ${{ job.status }}
+        run: ./scripts/release/9-update_dashboard.sh
+
+      - name: Deploy Release Pipeline Dashboard to GitHub Pages
+        if: always() && github.ref == 'refs/heads/main' && needs.authorize.outputs.pr_number == ''
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: ./dashboard
+
+  publish-dashboard:
+    name: Publish Dashboard (GitHub Pages)
+    needs: [authorize, release-pipeline]
+    if: always() && github.ref == 'refs/heads/main' && needs.authorize.outputs.pr_number == '' && (needs.release-pipeline.result == 'success' || needs.release-pipeline.result == 'failure')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

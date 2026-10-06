@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gardener GDC Release Pipeline Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --success: #22c55e;
+      --failure: #ef4444;
+      --running: #3b82f6;
+      --skipped: #64748b;
+      --accent: #10b981;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    .container { max-width: 1280px; margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+    }
+    h1 { margin: 0; font-size: 1.5rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+    }
+    .kpi-label { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .kpi-value { font-size: 1.6rem; font-weight: 700; margin-top: 8px; }
+    .pipeline-stages {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .stage-pill {
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 0.85rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge.success { background: rgba(34, 197, 94, 0.18); color: var(--success); }
+    .badge.failure { background: rgba(239, 68, 68, 0.18); color: var(--failure); }
+    .badge.running { background: rgba(59, 130, 246, 0.18); color: var(--running); }
+    .badge.skipped, .badge.unknown { background: rgba(100, 116, 139, 0.2); color: var(--muted); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 0.88rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    th { color: var(--muted); font-weight: 600; }
+    a { color: #38bdf8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: rgba(15, 23, 42, 0.6);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Gardener GDC Release Pipeline Dashboard</h1>
+        <div class="subtitle">
+          Nightly (Mon–Fri 02:00 UTC) &amp; Maintainer-Triggered E2E Release Certification on GDC Staging
+        </div>
+      </div>
+      <div>
+        <a href="https://github.com/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml" target="_blank" rel="noopener">
+          View GitHub Actions Workflow &rarr;
+        </a>
+      </div>
+    </header>
+
+    <div class="kpi-grid">
+      <div class="card">
+        <div class="kpi-label">Total Recorded Runs</div>
+        <div class="kpi-value" id="kpi-total">0</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Certification Pass Rate</div>
+        <div class="kpi-value" id="kpi-pass-rate">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Latest Certified Version</div>
+        <div class="kpi-value" id="kpi-latest-certified">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Schedule</div>
+        <div class="kpi-value" style="font-size: 1.15rem;">Mon–Fri 02:00 UTC</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="kpi-label">Latest Pipeline Execution Stage Progress</div>
+      <div class="pipeline-stages" id="latest-stages"></div>
+    </div>
+
+    <div class="card">
+      <div class="kpi-label">Release Pipeline Execution History</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Timestamp (UTC)</th>
+            <th>Trigger</th>
+            <th>Status</th>
+            <th>Artifacts Version</th>
+            <th>Component Commits (Ext / MCM / DNS)</th>
+            <th>Stages (B / G / S / Sh / T / Td / Pub)</th>
+            <th>Duration</th>
+          </tr>
+        </thead>
+        <tbody id="runs-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    async function loadDashboard() {
+      const res = await fetch('./data/runs.json');
+      const runs = await res.json();
+      document.getElementById('kpi-total').textContent = runs.length;
+
+      const passed = runs.filter(r => r.status === 'success');
+      const passRate = runs.length ? Math.round((passed.length / runs.length) * 100) + '%' : '-';
+      document.getElementById('kpi-pass-rate').textContent = passRate;
+      document.getElementById('kpi-latest-certified').textContent =
+        passed.length ? passed[0].artifactsVersion : 'None';
+
+      const stageOrder = [
+        ['build', '1. Build (GHCR)'],
+        ['deployGarden', '3. Virtual Garden'],
+        ['deploySeed', '4. GDC Seed'],
+        ['deployShoot', '5. GDC Shoot'],
+        ['testShoot', '6. E2E & Conformance'],
+        ['teardown', '7. Teardown'],
+        ['publish', '8. Publish Public']
+      ];
+
+      const latestStagesEl = document.getElementById('latest-stages');
+      if (runs.length > 0) {
+        const latest = runs[0];
+        latestStagesEl.innerHTML = stageOrder.map(([key, label]) => {
+          const st = (latest.stages && latest.stages[key]) || 'unknown';
+          return `<div class="stage-pill"><span>${label}</span><span class="badge ${st}">${st}</span></div>`;
+        }).join('');
+      }
+
+      const tbody = document.getElementById('runs-tbody');
+      tbody.innerHTML = runs.map(r => {
+        const st = r.stages || {};
+        const stageBadges = ['build', 'deployGarden', 'deploySeed', 'deployShoot', 'testShoot', 'teardown', 'publish']
+          .map(k => `<span class="badge ${st[k] || 'unknown'}">${(st[k] || '-')[0]}</span>`)
+          .join(' ');
+        const comp = r.components || {};
+        return `<tr>
+          <td><a href="${r.runUrl}" target="_blank" rel="noopener">#${r.runNumber}</a></td>
+          <td>${r.timestamp}</td>
+          <td><code>${r.trigger}</code> (@${r.actor})</td>
+          <td><span class="badge ${r.status}">${r.status}</span></td>
+          <td><code>${r.artifactsVersion}</code></td>
+          <td><code>${comp.extensionProviderGDC || '-'}</code> / <code>${comp.mcmProviderGDC || '-'}</code> / <code>${comp.externalDNS || '-'}</code></td>
+          <td>${stageBadges}</td>
+          <td>${r.duration || 'N/A'}</td>
+        </tr>`;
+      }).join('');
+    }
+    loadDashboard().catch(console.error);
+  </script>
+</body>
+</html>
