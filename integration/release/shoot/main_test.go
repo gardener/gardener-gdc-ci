@@ -42,7 +42,7 @@ import (
 var (
 	gardenerArtifactsVersion       = flag.String("gardener-artifacts-version", "", "The short artifacts version for gardener repo")
 	externalDNSArtifactsVersion    = flag.String("external-dns-artifacts-version", "", "The short artifacts version for external-dns-management repo")
-	externalDNSManagementImageName = flag.String("external-dns-management-image-name", "external-dns-management-gdch", "The name of the external DNS management image")
+	externalDNSManagementImageName = flag.String("external-dns-management-image-name", "external-dnsman2-gdch", "The name of the external DNS management image")
 	releaseConfigurationFilePath   = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
 	virtualGardenProvider          = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 )

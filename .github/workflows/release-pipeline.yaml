@@ -14,6 +14,24 @@ on:
   # Allow manual trigger by approved Google and SAP maintainers only
   workflow_dispatch:
     inputs:
+      release_mode:
+        description: 'Pipeline execution mode (snapshot for pre-release/nightly, release for official SemVer release)'
+        required: false
+        default: 'snapshot'
+        type: choice
+        options:
+          - snapshot
+          - release
+      next_version:
+        description: 'Next -dev version bump operation after a successful official release (used when release_mode == release)'
+        required: false
+        default: 'bump-patch'
+        type: choice
+        options:
+          - bump-patch
+          - bump-minor
+          - bump-major
+          - noop
       pr_number:
         description: 'Optional Pull Request number to test (merges main into PR branch and reports check-run on PR)'
         required: false
@@ -96,7 +114,10 @@ jobs:
     timeout-minutes: 360
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GDC_RELEASE_GITHUB_TOKEN: ${{ secrets.GDC_RELEASE_GITHUB_TOKEN }}
       PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+      RELEASE_MODE: ${{ (github.event_name == 'workflow_dispatch' && needs.authorize.outputs.pr_number == '' && inputs.release_mode == 'release') && 'release' || 'snapshot' }}
+      NEXT_VERSION: ${{ inputs.next_version || 'bump-patch' }}
       EXTENSION_GDC_REF: ${{ inputs.extension_gdc_ref || 'main' }}
       MCM_PROVIDER_GDC_REF: ${{ inputs.mcm_provider_gdc_ref || 'main' }}
       EXTERNAL_DNS_REF: ${{ inputs.external_dns_ref || 'master' }}
@@ -176,7 +197,7 @@ jobs:
         if: success() && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
         uses: gardener/cc-utils/.github/actions/params@v1
         with:
-          mode: ${{ needs.authorize.outputs.pr_number != '' && 'snapshot' || 'release' }}
+          mode: ${{ (github.event_name == 'workflow_dispatch' && needs.authorize.outputs.pr_number == '' && inputs.release_mode == 'release') && 'release' || 'snapshot' }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Authenticate to Gardener Public Registry (OIDC via gardener/cc-utils)
@@ -196,6 +217,7 @@ jobs:
       - name: Stage 9 - Update Release Pipeline Dashboard & Summary
         if: always()
         env:
+          PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry || 'europe-docker.pkg.dev/gardener-project/snapshots' }}
           STAGE_BUILD_STATUS: ${{ steps.stage_build.outcome }}
           STAGE_DEPLOY_GARDEN_STATUS: ${{ steps.stage_deploy_garden.outcome }}
           STAGE_DEPLOY_SEED_STATUS: ${{ steps.stage_deploy_seed.outcome }}

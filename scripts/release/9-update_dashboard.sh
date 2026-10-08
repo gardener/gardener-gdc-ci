@@ -37,12 +37,14 @@ STAGE_PUBLISH="${STAGE_PUBLISH_STATUS:-skipped}"
 OVERALL_STATUS="${OVERALL_PIPELINE_STATUS:-failure}"
 DURATION="${PIPELINE_DURATION:-N/A}"
 
+RELEASE_MODE_VAL="${RELEASE_MODE:-snapshot}"
 ARTIFACTS_VERSION="unknown"
 EXT_SHA="N/A"
 MCM_GDC_SHA="N/A"
 DNS_SHA="N/A"
 CCM_GDC_SHA="N/A"
 if [[ -f "${RELEASE_METADATA_FILE}" ]]; then
+  RELEASE_MODE_VAL="$(yq -r '.releaseMode // "snapshot"' "${RELEASE_METADATA_FILE}")"
   ARTIFACTS_VERSION="$(yq -r '.gardenerArtifactsVersion // "unknown"' "${RELEASE_METADATA_FILE}")"
   EXT_SHA="$(yq -r '.components.gardenerExtensionProviderGDC.commitSHA // "N/A"' "${RELEASE_METADATA_FILE}")"
   MCM_GDC_SHA="$(yq -r '.components.machineControllerManagerProviderGDC.commitSHA // "N/A"' "${RELEASE_METADATA_FILE}")"
@@ -55,6 +57,7 @@ NEW_ENTRY="$(jq -n \
   --arg runNumber "${RUN_NUMBER}" \
   --arg timestamp "${TIMESTAMP}" \
   --arg trigger "${TRIGGER_EVENT}" \
+  --arg releaseMode "${RELEASE_MODE_VAL}" \
   --arg actor "${ACTOR}" \
   --arg status "${OVERALL_STATUS}" \
   --arg duration "${DURATION}" \
@@ -77,6 +80,7 @@ NEW_ENTRY="$(jq -n \
     runNumber: $runNumber,
     timestamp: $timestamp,
     trigger: $trigger,
+    releaseMode: $releaseMode,
     actor: $actor,
     status: $status,
     duration: $duration,
@@ -113,6 +117,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 | :--- | :--- |
 | **Overall Status** | \`${OVERALL_STATUS}\` |
 | **Trigger** | \`${TRIGGER_EVENT}\` (by \`@${ACTOR}\`) |
+| **Release Mode** | \`${RELEASE_MODE_VAL}\` |
 | **Artifacts Version** | \`${ARTIFACTS_VERSION}\` |
 | **Extension Provider GDC SHA** | \`${EXT_SHA}\` |
 | **MCM Provider GDC SHA** | \`${MCM_GDC_SHA}\` |

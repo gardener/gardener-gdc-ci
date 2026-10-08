@@ -23,8 +23,8 @@ clone_github_repo() {
 
   rm -rf "${target_dir}"
   echo "Cloning ${repo_url} (ref: ${ref})..." >&2
-  git clone --depth 1 --branch "${ref}" "${repo_url}" "${target_dir}" >/dev/null 2>&1 || {
-    git clone "${repo_url}" "${target_dir}" >&2
+  git clone --branch "${ref}" --tags "${repo_url}" "${target_dir}" >/dev/null 2>&1 || {
+    git clone --tags "${repo_url}" "${target_dir}" >&2
     git -C "${target_dir}" checkout "${ref}" >&2
   }
   git -C "${target_dir}" rev-parse --short=7 HEAD
@@ -41,15 +41,91 @@ MCM_GDC_SHA="$(clone_github_repo "${MCM_PROVIDER_GDC_REPO}" "${MCM_PROVIDER_GDC_
 DNS_SHA="$(clone_github_repo "${EXTERNAL_DNS_REPO}" "${EXTERNAL_DNS_REF}" "${DNS_DIR}")"
 CCM_GDC_SHA="$(clone_github_repo "${CLOUD_PROVIDER_GDC_REPO}" "${CLOUD_PROVIDER_GDC_REF}" "${CCM_GDC_DIR}")"
 
-# Compute valid SemVer 2.0 candidate artifact version tags using each repository's commit SHA
-# so both `helm package` (which requires SemVer) and `GetCommitHashOrSanitize` (which extracts
-# the suffix after the last hyphen) work seamlessly.
-EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-v0.0.0-staging.1-${EXT_SHA}}"
-MCM_PROVIDER_GDC_ARTIFACTS_VERSION="${MCM_PROVIDER_GDC_ARTIFACTS_VERSION:-v0.0.0-staging.1-${MCM_GDC_SHA}}"
-EXTERNAL_DNS_ARTIFACTS_VERSION="${EXTERNAL_DNS_ARTIFACTS_VERSION:-v0.23.0-staging.1-${DNS_SHA}}"
-CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION:-v0.0.0-staging.1-${CCM_GDC_SHA}}"
+read_repo_version() {
+  local repo_dir="$1"
+  if [[ ! -f "${repo_dir}/VERSION" ]]; then
+    echo "::error::VERSION file not found in ${repo_dir}" >&2
+    return 1
+  fi
+  tr -d '[:space:]' < "${repo_dir}/VERSION"
+}
+
+get_last_release_tag() {
+  local repo_dir="$1"
+  git -C "${repo_dir}" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo ""
+}
+
+has_code_changes_since_tag() {
+  local repo_dir="$1"
+  local last_tag="$2"
+  if [[ -z "${last_tag}" ]]; then
+    return 0
+  fi
+  if git -C "${repo_dir}" diff --quiet "${last_tag}"..HEAD -- . ':!VERSION'; then
+    return 1
+  fi
+  return 0
+}
+
+RELEASE_MODE="${RELEASE_MODE:-snapshot}"
+NEXT_VERSION="${NEXT_VERSION:-bump-patch}"
+
+EXT_BASE_VERSION="$(read_repo_version "${EXT_DIR}")"
+MCM_GDC_BASE_VERSION="$(read_repo_version "${MCM_GDC_DIR}")"
+CCM_GDC_BASE_VERSION="$(read_repo_version "${CCM_GDC_DIR}")"
+DNS_BASE_VERSION="$(read_repo_version "${DNS_DIR}")"
+
+EXT_LAST_TAG="$(get_last_release_tag "${EXT_DIR}")"
+MCM_LAST_TAG="$(get_last_release_tag "${MCM_GDC_DIR}")"
+CCM_LAST_TAG="$(get_last_release_tag "${CCM_GDC_DIR}")"
+
+EXT_NEEDS_RELEASE="true"
+MCM_NEEDS_RELEASE="true"
+CCM_NEEDS_RELEASE="true"
+
+# Compute SemVer 2.0 artifact version tags from each repository's VERSION file:
+# - In `release` mode: check if code changed since the last published release tag (excluding VERSION).
+#   - If changed (or no prior tag): strip `-dev` (`vX.Y.Z`) and set `needsRelease=true`.
+#   - If unchanged: reuse `<last_tag>` for E2E testing and set `needsRelease=false` so Stage 8 skips
+#     pushing duplicate artifacts to `releases`, creating tags, or bumping `VERSION`.
+# - In `snapshot` mode: use `<VERSION>-<short_sha>` (`vX.Y.Z-dev-<sha>`).
+# - `external-dns-management` is upstream-managed and always uses `<VERSION>-<short_sha>`.
+if [[ "${RELEASE_MODE}" == "release" ]]; then
+  if has_code_changes_since_tag "${EXT_DIR}" "${EXT_LAST_TAG}"; then
+    EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_BASE_VERSION%-dev}}"
+  else
+    EXT_NEEDS_RELEASE="false"
+    EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_LAST_TAG}}"
+  fi
+
+  if has_code_changes_since_tag "${MCM_GDC_DIR}" "${MCM_LAST_TAG}"; then
+    MCM_PROVIDER_GDC_ARTIFACTS_VERSION="${MCM_PROVIDER_GDC_ARTIFACTS_VERSION:-${MCM_GDC_BASE_VERSION%-dev}}"
+  else
+    MCM_NEEDS_RELEASE="false"
+    MCM_PROVIDER_GDC_ARTIFACTS_VERSION="${MCM_PROVIDER_GDC_ARTIFACTS_VERSION:-${MCM_LAST_TAG}}"
+  fi
+
+  if has_code_changes_since_tag "${CCM_GDC_DIR}" "${CCM_LAST_TAG}"; then
+    CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION:-${CCM_GDC_BASE_VERSION%-dev}}"
+  else
+    CCM_NEEDS_RELEASE="false"
+    CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION:-${CCM_LAST_TAG}}"
+  fi
+else
+  EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_BASE_VERSION}-${EXT_SHA}}"
+  MCM_PROVIDER_GDC_ARTIFACTS_VERSION="${MCM_PROVIDER_GDC_ARTIFACTS_VERSION:-${MCM_GDC_BASE_VERSION}-${MCM_GDC_SHA}}"
+  CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION:-${CCM_GDC_BASE_VERSION}-${CCM_GDC_SHA}}"
+fi
+EXTERNAL_DNS_ARTIFACTS_VERSION="${EXTERNAL_DNS_ARTIFACTS_VERSION:-${DNS_BASE_VERSION}-${DNS_SHA}}"
 GARDENER_ARTIFACTS_VERSION="${GARDENER_ARTIFACTS_VERSION:-${EXTENSION_GDC_ARTIFACTS_VERSION}}"
+# Drop leading 'v' for Helm chart SemVer
 CHART_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION#v}"
+
+echo "Resolved artifact versions (RELEASE_MODE=${RELEASE_MODE}):"
+echo "  gardener-extension-provider-gdc:         ${EXTENSION_GDC_ARTIFACTS_VERSION} (chart: ${CHART_VERSION}, lastTag=${EXT_LAST_TAG:-none}, needsRelease=${EXT_NEEDS_RELEASE})"
+echo "  machine-controller-manager-provider-gdc: ${MCM_PROVIDER_GDC_ARTIFACTS_VERSION} (lastTag=${MCM_LAST_TAG:-none}, needsRelease=${MCM_NEEDS_RELEASE})"
+echo "  cloud-provider-gdc:                      ${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION} (lastTag=${CCM_LAST_TAG:-none}, needsRelease=${CCM_NEEDS_RELEASE})"
+echo "  external-dns-management (snapshot):      ${EXTERNAL_DNS_ARTIFACTS_VERSION}"
 
 # Helper to push a candidate image to GHCR
 push_candidate_image() {
@@ -101,7 +177,8 @@ push_candidate_image "${PUBLIC_REGISTRY}/gardener-extension-admission-gdch:${EXT
   "gardener-extension-admission-gdch" "${EXTENSION_GDC_ARTIFACTS_VERSION}"
 
 CHARTS_OUT_DIR="${RELEASE_ARTIFACTS_DIR}/charts"
-mkdir -p "${CHARTS_OUT_DIR}"
+TEST_CHARTS_OUT_DIR="${RELEASE_WORK_DIR}/test-charts"
+mkdir -p "${CHARTS_OUT_DIR}" "${TEST_CHARTS_OUT_DIR}"
 package_and_push_helm_chart "${EXT_DIR}/charts/extension-provider" "${CHART_VERSION}" "${CHARTS_OUT_DIR}"
 package_and_push_helm_chart "${EXT_DIR}/charts/extension-admission/charts/application" "${CHART_VERSION}" "${CHARTS_OUT_DIR}"
 package_and_push_helm_chart "${EXT_DIR}/charts/extension-admission/charts/runtime" "${CHART_VERSION}" "${CHARTS_OUT_DIR}"
@@ -112,15 +189,11 @@ IMAGE_TAG="${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" make -C "${MCM_GDC_DIR}" docke
 push_candidate_image "${PUBLIC_REGISTRY}/machine-controller-manager-provider-gdch:${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" \
   "machine-controller-manager-provider-gdch" "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
 
-# 4. Build & Push external-dns-management (legacy and next-gen dnsman2 targets)
-echo "Building external-dns-management (${DNS_SHA})..."
-docker build -t "${PUBLIC_REGISTRY}/external-dns-management-gdch:${EXTERNAL_DNS_ARTIFACTS_VERSION}" \
-  -f "${DNS_DIR}/Dockerfile" --target dns-controller-manager "${DNS_DIR}"
+# 4. Build & Push external-dns-management (next-gen dnsman2 target)
+echo "Building external-dnsman2-gdch (${DNS_SHA})..."
 docker build -t "${PUBLIC_REGISTRY}/external-dnsman2-gdch:${EXTERNAL_DNS_ARTIFACTS_VERSION}" \
   -f "${DNS_DIR}/Dockerfile" --target dns-controller-manager-next-generation "${DNS_DIR}"
 
-push_candidate_image "${PUBLIC_REGISTRY}/external-dns-management-gdch:${EXTERNAL_DNS_ARTIFACTS_VERSION}" \
-  "external-dns-management-gdch" "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
 push_candidate_image "${PUBLIC_REGISTRY}/external-dnsman2-gdch:${EXTERNAL_DNS_ARTIFACTS_VERSION}" \
   "external-dnsman2-gdch" "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
 
@@ -149,8 +222,8 @@ awk '
   }
   { print }
 ' "${CLUSTERROLE_FILE}" > "${CLUSTERROLE_FILE}.tmp" && mv "${CLUSTERROLE_FILE}.tmp" "${CLUSTERROLE_FILE}"
-helm package "${GARDENER_TEMP_DIR}/charts/gardener/gardenlet" --version "${GARDENLET_CHART_VERSION}" --destination "${CHARTS_OUT_DIR}"
-helm push "${CHARTS_OUT_DIR}/gardenlet-${GARDENLET_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}/private-cloud"
+helm package "${GARDENER_TEMP_DIR}/charts/gardener/gardenlet" --version "${GARDENLET_CHART_VERSION}" --destination "${TEST_CHARTS_OUT_DIR}"
+helm push "${TEST_CHARTS_OUT_DIR}/gardenlet-${GARDENLET_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}/private-cloud"
 rm -rf "${GARDENER_TEMP_DIR}"
 
 SHOOT_DNS_SERVICE_VERSION="$(yq -r '.gardener.externalDNSExtension.version' "${PIPELINE_CONFIG_FILE}")"
@@ -190,8 +263,8 @@ diff --git a/charts/gardener-extension-shoot-dns-service/templates/dnsman-crds.y
  apiVersion: apiextensions.k8s.io/v1
  kind: CustomResourceDefinition
 PATCH_EOF
-helm package "${DNS_EXT_TEMP_DIR}/charts/gardener-extension-shoot-dns-service" --version "${SHOOT_DNS_CHART_VERSION}" --destination "${CHARTS_OUT_DIR}"
-helm push "${CHARTS_OUT_DIR}/gardener-extension-shoot-dns-service-${SHOOT_DNS_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}"
+helm package "${DNS_EXT_TEMP_DIR}/charts/gardener-extension-shoot-dns-service" --version "${SHOOT_DNS_CHART_VERSION}" --destination "${TEST_CHARTS_OUT_DIR}"
+helm push "${TEST_CHARTS_OUT_DIR}/gardener-extension-shoot-dns-service-${SHOOT_DNS_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}"
 rm -rf "${DNS_EXT_TEMP_DIR}"
 
 CILIUM_EXT_VERSION="$(yq -r '.gardener.ciliumExtension.version' "${PIPELINE_CONFIG_FILE}")"
@@ -200,8 +273,8 @@ CILIUM_CHART_VERSION="${CILIUM_CHART_REF##*:}"
 echo "Building and pushing gardener-extension-networking-cilium Helm chart (${CILIUM_EXT_VERSION}) to oci://${GHCR_REGISTRY}..."
 CILIUM_TEMP_DIR="$(mktemp -d)"
 git clone --depth 1 --branch "${CILIUM_EXT_VERSION}" https://github.com/gardener/gardener-extension-networking-cilium.git "${CILIUM_TEMP_DIR}"
-helm package "${CILIUM_TEMP_DIR}/charts/gardener-extension-networking-cilium" --version "${CILIUM_CHART_VERSION}" --destination "${CHARTS_OUT_DIR}"
-helm push "${CHARTS_OUT_DIR}/gardener-extension-networking-cilium-${CILIUM_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}"
+helm package "${CILIUM_TEMP_DIR}/charts/gardener-extension-networking-cilium" --version "${CILIUM_CHART_VERSION}" --destination "${TEST_CHARTS_OUT_DIR}"
+helm push "${TEST_CHARTS_OUT_DIR}/gardener-extension-networking-cilium-${CILIUM_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}"
 rm -rf "${CILIUM_TEMP_DIR}"
 
 GARDENLINUX_EXT_VERSION="$(yq -r '.gardener.gardenlinuxExtension.version' "${PIPELINE_CONFIG_FILE}")"
@@ -210,12 +283,14 @@ GARDENLINUX_CHART_VERSION="${GARDENLINUX_CHART_REF##*:}"
 echo "Building and pushing gardener-extension-os-gardenlinux Helm chart (${GARDENLINUX_EXT_VERSION}) to oci://${GHCR_REGISTRY}..."
 GARDENLINUX_TEMP_DIR="$(mktemp -d)"
 git clone --depth 1 --branch "${GARDENLINUX_EXT_VERSION}" https://github.com/gardener/gardener-extension-os-gardenlinux.git "${GARDENLINUX_TEMP_DIR}"
-helm package "${GARDENLINUX_TEMP_DIR}/charts/gardener-extension-os-gardenlinux" --version "${GARDENLINUX_CHART_VERSION}" --destination "${CHARTS_OUT_DIR}"
-helm push "${CHARTS_OUT_DIR}/gardener-extension-os-gardenlinux-${GARDENLINUX_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}"
+helm package "${GARDENLINUX_TEMP_DIR}/charts/gardener-extension-os-gardenlinux" --version "${GARDENLINUX_CHART_VERSION}" --destination "${TEST_CHARTS_OUT_DIR}"
+helm push "${TEST_CHARTS_OUT_DIR}/gardener-extension-os-gardenlinux-${GARDENLINUX_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}"
 rm -rf "${GARDENLINUX_TEMP_DIR}"
 
 # 7. Write release-metadata.yaml for downstream pipeline stages and promotion
 cat > "${RELEASE_METADATA_FILE}" <<EOF
+releaseMode: "${RELEASE_MODE}"
+nextVersion: "${NEXT_VERSION}"
 gardenerArtifactsVersion: "${GARDENER_ARTIFACTS_VERSION}"
 extensionGDCArtifactsVersion: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
 mcmProviderGDCArtifactsVersion: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
@@ -228,6 +303,9 @@ components:
     repository: "${EXTENSION_GDC_REPO}"
     ref: "${EXTENSION_GDC_REF}"
     commitSHA: "${EXT_SHA}"
+    version: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
+    lastReleaseTag: "${EXT_LAST_TAG}"
+    needsRelease: ${EXT_NEEDS_RELEASE}
     images:
       - name: "gardener-extension-provider-gdch"
         tag: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
@@ -237,6 +315,9 @@ components:
     repository: "${MCM_PROVIDER_GDC_REPO}"
     ref: "${MCM_PROVIDER_GDC_REF}"
     commitSHA: "${MCM_GDC_SHA}"
+    version: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
+    lastReleaseTag: "${MCM_LAST_TAG}"
+    needsRelease: ${MCM_NEEDS_RELEASE}
     images:
       - name: "machine-controller-manager-provider-gdch"
         tag: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
@@ -244,15 +325,17 @@ components:
     repository: "${EXTERNAL_DNS_REPO}"
     ref: "${EXTERNAL_DNS_REF}"
     commitSHA: "${DNS_SHA}"
+    version: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
     images:
-      - name: "external-dns-management-gdch"
-        tag: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
       - name: "external-dnsman2-gdch"
         tag: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
   cloudProviderGDC:
     repository: "${CLOUD_PROVIDER_GDC_REPO}"
     ref: "${CLOUD_PROVIDER_GDC_REF}"
     commitSHA: "${CCM_GDC_SHA}"
+    version: "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
+    lastReleaseTag: "${CCM_LAST_TAG}"
+    needsRelease: ${CCM_NEEDS_RELEASE}
     images:
       - name: "cloud-controller-manager-gdch"
         tag: "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
