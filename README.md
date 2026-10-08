@@ -51,7 +51,6 @@ An authorized maintainer can manually trigger the release pipeline using any of 
    | `mcm_provider_gdc_ref` | `main` | Git ref (branch, tag, or commit SHA) for `gardener/machine-controller-manager-provider-gdc` |
    | `external_dns_ref` | `master` | Git ref (branch, tag, or commit SHA) for `gardener/external-dns-management` |
    | `cloud_provider_gdc_ref` | `main` | Git ref (branch, tag, or commit SHA) for `GoogleCloudPlatform/cloud-provider-gdc` |
-   | `virtual_garden_provider` | `gke` | Cluster provider hosting Virtual Garden (`gke` or `gdc`) |
    | `skip_conformance` | `false` | Skip the Sonobuoy CNCF Kubernetes conformance suite for faster validation runs |
    | `publish_to_public_registry` | `true` | Promote certified artifacts to the Gardener public registry in Stage 8 on success |
 
