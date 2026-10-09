@@ -39,14 +39,6 @@ on:
         required: false
         default: 'main'
         type: string
-      virtual_garden_provider:
-        description: 'Cluster provider hosting Virtual Garden'
-        required: false
-        default: 'gke'
-        type: choice
-        options:
-          - gke
-          - gdc
       skip_conformance:
         description: 'Skip Sonobuoy CNCF conformance suite (faster validation run)'
         required: false
@@ -109,7 +101,6 @@ jobs:
       MCM_PROVIDER_GDC_REF: ${{ inputs.mcm_provider_gdc_ref || 'main' }}
       EXTERNAL_DNS_REF: ${{ inputs.external_dns_ref || 'master' }}
       CLOUD_PROVIDER_GDC_REF: ${{ inputs.cloud_provider_gdc_ref || 'main' }}
-      VIRTUAL_GARDEN_PROVIDER: ${{ inputs.virtual_garden_provider || 'gke' }}
       SKIP_CONFORMANCE: ${{ inputs.skip_conformance || 'false' }}
       GDC_RELEASE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDC_RELEASE_SERVICE_ACCOUNT_KEY }}
       GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON: ${{ secrets.GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON }}
