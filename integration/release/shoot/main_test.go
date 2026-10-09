@@ -173,6 +173,10 @@ func createShoot(ctx context.Context, gardenClient client.WithWatch, cfg *config
 	}
 }
 
+// ensureSeedShootNamespaceWorkarounds applies Seed-level workarounds in the Shoot's control-plane namespace:
+//  1. Creates NetworkPolicy/allow-all-etcd so Cilium VXLAN on KubeVirt Seed nodes does not drop cross-node etcd peer traffic (2380) during bootstrap.
+//  2. Annotates Shoot control-plane PVCs with cdi.kubevirt.io/storage.usePopulator=false and cdi.kubevirt.io/storage.bind.immediate.requested=true
+//     so KubeVirt CSI DataVolumes on the infra cluster bind immediately without deadlocking on CDI VolumeBlankSource populators under WaitForFirstConsumer.
 func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg *config.ReleaseTestConfig, shootKey client.ObjectKey) {
 	if cfg == nil || cfg.Seed == nil || cfg.Seed.HostCluster == nil {
 		return
@@ -209,6 +213,7 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 				continue
 			}
 
+			// Allow cross-node etcd peer communication during initial 3-node etcd cluster bootstrap on KubeVirt Seeds.
 			if !netpolCreated {
 				np := &networkingv1.NetworkPolicy{
 					ObjectMeta: metav1.ObjectMeta{
@@ -230,6 +235,7 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 				}
 			}
 
+			// Bypass CDI VolumeBlankSource populator and request immediate binding so KubeVirt hotplug attaches etcd PVCs without stalling.
 			pvcList := &corev1.PersistentVolumeClaimList{}
 			if err := seedClient.List(ctx, pvcList, client.InNamespace(shootNamespace)); err == nil {
 				for _, item := range pvcList.Items {

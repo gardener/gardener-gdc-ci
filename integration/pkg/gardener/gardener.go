@@ -282,6 +282,7 @@ func DeployOperatorExtension(ctx context.Context, runtimeClusterClient client.Wi
 			Name: config.Name,
 		},
 	}
+	// Retry on optimistic concurrency conflicts (409) when gardener-operator concurrently updates Extension status/finalizers.
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		_, updateErr := controllerutil.CreateOrUpdate(ctx, runtimeClusterClient, extopDeployment, func() error {
 			extopDeployment.Spec = operatorv1alpha1.ExtensionSpec{

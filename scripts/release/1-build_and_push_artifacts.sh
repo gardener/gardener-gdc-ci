@@ -89,7 +89,7 @@ CCM_NEEDS_RELEASE="true"
 #   - If unchanged: reuse `<last_tag>` for E2E testing and set `needsRelease=false` so Stage 8 skips
 #     pushing duplicate artifacts to `releases`, creating tags, or bumping `VERSION`.
 # - In `snapshot` mode: use `<VERSION>-<short_sha>` (`vX.Y.Z-dev-<sha>`).
-# - `external-dns-management` is upstream-managed and always uses `<VERSION>-<short_sha>`.
+# - `external-dns-management` strips `-dev` in `release` mode (`vX.Y.Z`) and uses `<VERSION>-<short_sha>` in `snapshot` mode.
 if [[ "${RELEASE_MODE}" == "release" ]]; then
   if has_code_changes_since_tag "${EXT_DIR}" "${EXT_LAST_TAG}"; then
     EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_BASE_VERSION%-dev}}"
@@ -111,12 +111,14 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
     CCM_NEEDS_RELEASE="false"
     CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION:-${CCM_LAST_TAG}}"
   fi
+
+  EXTERNAL_DNS_ARTIFACTS_VERSION="${EXTERNAL_DNS_ARTIFACTS_VERSION:-${DNS_BASE_VERSION%-dev}}"
 else
   EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_BASE_VERSION}-${EXT_SHA}}"
   MCM_PROVIDER_GDC_ARTIFACTS_VERSION="${MCM_PROVIDER_GDC_ARTIFACTS_VERSION:-${MCM_GDC_BASE_VERSION}-${MCM_GDC_SHA}}"
   CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION:-${CCM_GDC_BASE_VERSION}-${CCM_GDC_SHA}}"
+  EXTERNAL_DNS_ARTIFACTS_VERSION="${EXTERNAL_DNS_ARTIFACTS_VERSION:-${DNS_BASE_VERSION}-${DNS_SHA}}"
 fi
-EXTERNAL_DNS_ARTIFACTS_VERSION="${EXTERNAL_DNS_ARTIFACTS_VERSION:-${DNS_BASE_VERSION}-${DNS_SHA}}"
 GARDENER_ARTIFACTS_VERSION="${GARDENER_ARTIFACTS_VERSION:-${EXTENSION_GDC_ARTIFACTS_VERSION}}"
 # Drop leading 'v' for Helm chart SemVer
 CHART_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION#v}"
@@ -125,7 +127,7 @@ echo "Resolved artifact versions (RELEASE_MODE=${RELEASE_MODE}):"
 echo "  gardener-extension-provider-gdc:         ${EXTENSION_GDC_ARTIFACTS_VERSION} (chart: ${CHART_VERSION}, lastTag=${EXT_LAST_TAG:-none}, needsRelease=${EXT_NEEDS_RELEASE})"
 echo "  machine-controller-manager-provider-gdc: ${MCM_PROVIDER_GDC_ARTIFACTS_VERSION} (lastTag=${MCM_LAST_TAG:-none}, needsRelease=${MCM_NEEDS_RELEASE})"
 echo "  cloud-provider-gdc:                      ${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION} (lastTag=${CCM_LAST_TAG:-none}, needsRelease=${CCM_NEEDS_RELEASE})"
-echo "  external-dns-management (snapshot):      ${EXTERNAL_DNS_ARTIFACTS_VERSION}"
+echo "  external-dns-management:                 ${EXTERNAL_DNS_ARTIFACTS_VERSION}"
 
 # Helper to push a candidate image to GHCR
 push_candidate_image() {

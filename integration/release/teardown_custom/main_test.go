@@ -1313,6 +1313,9 @@ func deleteGardenletDeployment(ctx context.Context, t *testing.T, targetClient c
 	}
 }
 
+// suppressRemoteShootVPAManagedResource ensures the host Shoot's shoot-core-vpa ManagedResource and target
+// resource-manager RBAC remain suspended on a Shooted Seed so they do not conflict with Seed VPA deletion
+// (gardener.cloud:vpa:target:status-actor) during teardown or overwrite Seed VPA status on subsequent runs.
 func suppressRemoteShootVPAManagedResource(ctx context.Context, t *testing.T, targetWatchClient client.Client, releaseConfigData *pkgConfig.ReleaseTestConfig, remoteShootKey client.ObjectKey) func() {
 	if targetWatchClient != nil {
 		crb := &unstructured.Unstructured{}

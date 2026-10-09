@@ -5,9 +5,9 @@
 name: Gardener GDC Release Pipeline
 
 on:
-  # Run every weeknight (Monday through Friday at 02:00 UTC; no weekend runs)
+  # Run every weeknight (Monday through Friday at 02:00 PST / 10:00 UTC; no weekend runs)
   schedule:
-    - cron: '0 2 * * 1-5'
+    - cron: '0 10 * * 1-5'
   # Allow authorized maintainers to trigger on Pull Requests via '/test-release' comment
   issue_comment:
     types: [created]

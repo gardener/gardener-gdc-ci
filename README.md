@@ -31,7 +31,7 @@ Each pipeline run executes the following end-to-end qualification flow:
 The **[Gardener GDC Release Pipeline](https://github.com/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml)** runs automatically on a schedule and can also be triggered on demand by approved Google and SAP maintainers listed in [`OWNERS_ALIASES`](OWNERS_ALIASES) / [`CODEOWNERS`](CODEOWNERS).
 
 ### 1. Automated Weeknight Schedule
-Runs automatically every weeknight (**Monday–Friday at `02:00 UTC`**) in `snapshot` mode against the default branches of all component repositories.
+Runs automatically every weeknight (**Monday–Friday at `02:00 PST`**) in `snapshot` mode against the default branches of all component repositories.
 
 ### 2. Pull Request Comment (`/test-release`)
 To run the full E2E pipeline against an open Pull Request in `gardener/gardener-gdc-ci`, comment on the PR:
@@ -104,7 +104,7 @@ Artifact versions are derived from the root `VERSION` file in each component rep
 | `gardener-extension-admission-gdch` | Image | `gardener/gardener-extension-provider-gdc` | `<VERSION>-<ext_sha>` (e.g. `v0.5.3-dev-8e432a2`) | `${VERSION%-dev}` (e.g. `v0.5.3`) |
 | `machine-controller-manager-provider-gdch` | Image | `gardener/machine-controller-manager-provider-gdc` | `<VERSION>-<mcm_sha>` (e.g. `v0.5.3-dev-3f9a1c4`) | `${VERSION%-dev}` (e.g. `v0.5.3`) |
 | `cloud-controller-manager-gdch` | Image | `GoogleCloudPlatform/cloud-provider-gdc` | `<VERSION>-<ccm_sha>` (e.g. `v0.5.3-dev-7b2d4e1`) | `${VERSION%-dev}` (e.g. `v0.5.3`) |
-| `external-dnsman2-gdch` | Image | `gardener/external-dns-management` | `<VERSION>-<dns_sha>` (e.g. `v0.53.0-dev-a1b2c3d`) | `<VERSION>-<dns_sha>` (e.g. `v0.53.0-dev-a1b2c3d`) |
+| `external-dnsman2-gdch` | Image | `gardener/external-dns-management` | `<VERSION>-<dns_sha>` (e.g. `v0.53.0-dev-a1b2c3d`) | `${VERSION%-dev}` (e.g. `v0.53.0`) |
 | `gardener-extension-provider-gdch-helm` | Helm Chart | `gardener/gardener-extension-provider-gdc` | `${VERSION#v}-<ext_sha>` (e.g. `0.5.3-dev-8e432a2`) | `${RELEASE_VER#v}` (e.g. `0.5.3`) |
 | `admission-gdch-application-helm` | Helm Chart | `gardener/gardener-extension-provider-gdc` | `${VERSION#v}-<ext_sha>` (e.g. `0.5.3-dev-8e432a2`) | `${RELEASE_VER#v}` (e.g. `0.5.3`) |
 | `admission-gdch-runtime-helm` | Helm Chart | `gardener/gardener-extension-provider-gdc` | `${VERSION#v}-<ext_sha>` (e.g. `0.5.3-dev-8e432a2`) | `${RELEASE_VER#v}` (e.g. `0.5.3`) |

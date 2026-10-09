@@ -508,6 +508,7 @@ func deployGardenlet(ctx context.Context, releaseConfigData *config.ReleaseTestC
 		return fmt.Errorf("failed to get shoot kubeconfig path: %w", err)
 	}
 
+	// Suppress the host Shoot's VPA before deploying gardenlet so only the Seed's VPA manages VPA resources on this cluster.
 	suppressRemoteShootTargetVPA(ctx, releaseConfigData)
 
 	// Install helm chart
@@ -525,9 +526,11 @@ func deployGardenlet(ctx context.Context, releaseConfigData *config.ReleaseTestC
 	return nil
 }
 
-// suppressRemoteShootTargetVPA disables the host Shoot's target VPA bindings on a Shooted Seed
-// so the host VUC's vpa-recommender (which has a stale CRD discovery cache across Seed teardowns)
-// cannot overwrite Seed VPA status (e.g. garden/prometheus-seed ConfigUnsupported=True) or block Seed teardown.
+// suppressRemoteShootTargetVPA disables the host Shoot's target VPA bindings on a Shooted Seed.
+// Pre-provisioned Seed host Shoots have Shoot VPA enabled alongside the Seed's own VPA; across Seed
+// teardowns, the host VUC's long-running vpa-recommender retains a stale CRD discovery cache for
+// monitoring.coreos.com/v1.Prometheus and overwrites garden/prometheus-seed with ConfigUnsupported=True
+// (blocking SeedSystemComponentsHealthy) while also conflicting on gardener.cloud:vpa:target:status-actor during Seed deletion.
 func suppressRemoteShootTargetVPA(ctx context.Context, releaseConfigData *config.ReleaseTestConfig) {
 	if releaseConfigData == nil || releaseConfigData.Seed == nil || releaseConfigData.Seed.HostCluster == nil || releaseConfigData.Seed.HostCluster.Shoot == nil {
 		return
@@ -538,6 +541,7 @@ func suppressRemoteShootTargetVPA(ctx context.Context, releaseConfigData *config
 	}
 	shootKey := client.ObjectKey{Name: remoteShootCluster.Name, Namespace: remoteShootCluster.Namespace}
 
+	// Pause shoot-core-vpa ManagedResource reconciliation on the host VUC.
 	if releaseConfigData != nil && releaseConfigData.GDC != nil && releaseConfigData.GDCClient != nil {
 		if userClusterClients, err := config.GetGDCUserClusterClients(releaseConfigData.GDC.UserClusters, releaseConfigData.GDCClient); err == nil {
 			shootNamespace := fmt.Sprintf("shoot--%s--%s", shootKey.Namespace, shootKey.Name)
@@ -567,6 +571,7 @@ func suppressRemoteShootTargetVPA(ctx context.Context, releaseConfigData *config
 	}
 	targetClient := shootClients.WatchClient
 
+	// Suspend target resource-manager RBAC and remove host Shoot VPA target bindings/webhook on the Seed host cluster.
 	crb := &unstructured.Unstructured{}
 	crb.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "rbac.authorization.k8s.io",
