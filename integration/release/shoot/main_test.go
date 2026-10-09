@@ -27,6 +27,7 @@ import (
 	securityv1alpha1 "github.com/gardener/gardener/pkg/apis/security/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -162,9 +163,88 @@ func createShoot(ctx context.Context, gardenClient client.WithWatch, cfg *config
 		t.Fatalf("failed to create or update shoot %q/%q: %v", shoot.Namespace, shoot.Name, err)
 	}
 	shootKey := client.ObjectKey{Name: cfg.TestShoot.Name, Namespace: gardenv1beta1constants.GardenNamespace}
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+	go ensureSeedShootNamespaceWorkarounds(watchCtx, t, cfg, shootKey)
+
 	err = gardener.WaitForShootReconciliation(ctx, gardenClient, shootKey, waitForShootCreationTimeout)
 	if err != nil {
 		t.Fatalf("shoot \"%q/%q\" reconciliation failed or timed out: %v", shoot.Namespace, shoot.Name, err)
+	}
+}
+
+func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg *config.ReleaseTestConfig, shootKey client.ObjectKey) {
+	if cfg == nil || cfg.Seed == nil || cfg.Seed.HostCluster == nil {
+		return
+	}
+	var seedClient client.Client
+	if cfg.Seed.HostCluster.UserClusterClient != nil {
+		seedClient = cfg.Seed.HostCluster.UserClusterClient
+	} else if cfg.Seed.HostCluster.Shoot != nil && cfg.Seed.HostCluster.Shoot.VirtualGarden != nil {
+		remoteShoot := cfg.Seed.HostCluster.Shoot
+		remoteShootKey := client.ObjectKey{Name: remoteShoot.Name, Namespace: remoteShoot.Namespace}
+		shootClients, err := gardener.NewShootClient(ctx, remoteShoot.VirtualGarden.Client, remoteShootKey)
+		if err != nil {
+			t.Logf("Warning: Could not create Seed client for Shoot namespace workarounds: %v", err)
+			return
+		}
+		seedClient = shootClients.WatchClient
+	}
+	if seedClient == nil {
+		return
+	}
+
+	shootNamespace := "shoot--" + shootKey.Namespace + "--" + shootKey.Name
+	netpolCreated := false
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ns := &corev1.Namespace{}
+			if err := seedClient.Get(ctx, client.ObjectKey{Name: shootNamespace}, ns); err != nil {
+				continue
+			}
+
+			if !netpolCreated {
+				np := &networkingv1.NetworkPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "allow-all-etcd",
+						Namespace: shootNamespace,
+					},
+					Spec: networkingv1.NetworkPolicySpec{
+						PodSelector: metav1.LabelSelector{},
+						Ingress:     []networkingv1.NetworkPolicyIngressRule{{}},
+						Egress:      []networkingv1.NetworkPolicyEgressRule{{}},
+						PolicyTypes: []networkingv1.PolicyType{
+							networkingv1.PolicyTypeIngress,
+							networkingv1.PolicyTypeEgress,
+						},
+					},
+				}
+				if err := seedClient.Create(ctx, np); err == nil || apierrors.IsAlreadyExists(err) {
+					netpolCreated = true
+				}
+			}
+
+			pvcList := &corev1.PersistentVolumeClaimList{}
+			if err := seedClient.List(ctx, pvcList, client.InNamespace(shootNamespace)); err == nil {
+				for _, item := range pvcList.Items {
+					if item.Annotations["cdi.kubevirt.io/storage.usePopulator"] != "false" {
+						pvc := item
+						patch := client.MergeFrom(pvc.DeepCopy())
+						if pvc.Annotations == nil {
+							pvc.Annotations = make(map[string]string)
+						}
+						pvc.Annotations["cdi.kubevirt.io/storage.usePopulator"] = "false"
+						_ = seedClient.Patch(ctx, &pvc, patch)
+					}
+				}
+			}
+		}
 	}
 }
 

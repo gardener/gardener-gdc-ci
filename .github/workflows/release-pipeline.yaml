@@ -119,7 +119,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GDC_RELEASE_GITHUB_TOKEN: ${{ secrets.GDC_RELEASE_GITHUB_TOKEN }}
       PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-      RELEASE_MODE: ${{ (github.event_name == 'workflow_dispatch' && needs.authorize.outputs.pr_number == '' && inputs.release_mode == 'release') && 'release' || 'snapshot' }}
+      RELEASE_MODE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.release_mode == 'release') || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/test-release release'))) && 'release' || 'snapshot' }}
       NEXT_VERSION: ${{ inputs.next_version || 'bump-patch' }}
       EXTENSION_GDC_REF: ${{ inputs.extension_gdc_ref || 'main' }}
       MCM_PROVIDER_GDC_REF: ${{ inputs.mcm_provider_gdc_ref || 'main' }}
@@ -200,7 +200,7 @@ jobs:
         if: success() && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
         uses: gardener/cc-utils/.github/actions/params@v1
         with:
-          mode: ${{ (github.event_name == 'workflow_dispatch' && needs.authorize.outputs.pr_number == '' && inputs.release_mode == 'release') && 'release' || 'snapshot' }}
+          mode: ${{ ((github.event_name == 'workflow_dispatch' && inputs.release_mode == 'release') || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/test-release release'))) && 'release' || 'snapshot' }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Authenticate to Gardener Public Registry (OIDC via gardener/cc-utils)
@@ -214,13 +214,13 @@ jobs:
         id: stage_publish
         if: success() && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
         env:
-          PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry }}
+          PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry }}/gardener/gardener-gdc-ci
         run: ./scripts/release/8-publish_release_artifacts.sh
 
       - name: Stage 9 - Update Release Pipeline Dashboard & Summary
         if: always()
         env:
-          PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry || 'europe-docker.pkg.dev/gardener-project/snapshots' }}
+          PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry && format('{0}/gardener/gardener-gdc-ci', steps.gardener_params.outputs.oci-registry) || 'europe-docker.pkg.dev/gardener-project/snapshots/gardener/gardener-gdc-ci' }}
           STAGE_BUILD_STATUS: ${{ steps.stage_build.outcome }}
           STAGE_DEPLOY_GARDEN_STATUS: ${{ steps.stage_deploy_garden.outcome }}
           STAGE_DEPLOY_SEED_STATUS: ${{ steps.stage_deploy_seed.outcome }}

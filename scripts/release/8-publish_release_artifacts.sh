@@ -219,6 +219,8 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
   else
     echo "Skipping Git tag and VERSION bump for ${CCM_REPO}: no code changes since ${CCM_LAST_TAG}."
   fi
+
+  echo "Skipping Git tag and VERSION update for ${EXTERNAL_DNS_REPO}: upstream repository is read-only."
 fi
 
 jq -n \
