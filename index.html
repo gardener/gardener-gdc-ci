@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gardener GDC Release Pipeline Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --success: #22c55e;
+      --failure: #ef4444;
+      --running: #3b82f6;
+      --skipped: #64748b;
+      --release: #a855f7;
+      --snapshot: #0ea5e9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    .container { max-width: 1320px; margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    h1 { margin: 0; font-size: 1.5rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+    }
+    .kpi-label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .kpi-value { font-size: 1.45rem; font-weight: 700; margin-top: 8px; word-break: break-all; }
+    .pipeline-stages {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .stage-pill {
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 0.85rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge.success, .badge.completed { background: rgba(34, 197, 94, 0.18); color: var(--success); }
+    .badge.failure { background: rgba(239, 68, 68, 0.18); color: var(--failure); }
+    .badge.running, .badge.in_progress, .badge.queued { background: rgba(59, 130, 246, 0.18); color: var(--running); }
+    .badge.skipped, .badge.unknown, .badge.cancelled { background: rgba(100, 116, 139, 0.2); color: var(--muted); }
+    .badge.release { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+    .badge.snapshot { background: rgba(14, 165, 233, 0.2); color: #38bdf8; }
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.85rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 0.86rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 12px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    th { color: var(--muted); font-weight: 600; }
+    a { color: #38bdf8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: rgba(15, 23, 42, 0.6);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Gardener GDC Release Pipeline Dashboard</h1>
+        <div class="subtitle">
+          Weeknight Snapshot (Mon–Fri 02:00 PST) &amp; Official SemVer Release Qualification on GDC Staging
+        </div>
+      </div>
+      <div>
+        <a href="https://github.com/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml" target="_blank" rel="noopener">
+          View GitHub Actions Workflow &rarr;
+        </a>
+      </div>
+    </header>
+
+    <div class="kpi-grid">
+      <div class="card">
+        <div class="kpi-label">Total Recorded Runs</div>
+        <div class="kpi-value" id="kpi-total">0</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Pass Rate</div>
+        <div class="kpi-value" id="kpi-pass-rate">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Latest Certified Release</div>
+        <div class="kpi-value" id="kpi-latest-release">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Latest Certified Snapshot</div>
+        <div class="kpi-value" id="kpi-latest-snapshot">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Weeknight Schedule</div>
+        <div class="kpi-value" style="font-size: 1.15rem;">Mon–Fri 02:00 PST</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="kpi-label">Latest Pipeline Execution Stage Progress</div>
+      <div class="pipeline-stages" id="latest-stages"></div>
+    </div>
+
+    <div class="card">
+      <div class="toolbar">
+        <div class="kpi-label">Release &amp; Snapshot Execution History</div>
+        <div>
+          <label for="mode-filter" style="color: var(--muted); font-size: 0.82rem; margin-right: 6px;">Mode:</label>
+          <select id="mode-filter">
+            <option value="all">All Runs (Snapshot &amp; Release)</option>
+            <option value="release">Release Only</option>
+            <option value="snapshot">Snapshot Only</option>
+          </select>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Timestamp</th>
+            <th>Mode</th>
+            <th>Trigger</th>
+            <th>Status</th>
+            <th>Artifacts Version</th>
+            <th>Component Commits (Ext / MCM / CCM / DNS)</th>
+            <th>Stages (B / G / S / Sh / T / Td / Pub)</th>
+            <th>Duration</th>
+          </tr>
+        </thead>
+        <tbody id="runs-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    let allRuns = [];
+
+    function renderTable() {
+      const modeFilter = document.getElementById('mode-filter').value;
+      const filtered = allRuns.filter(r => {
+        const mode = (r.releaseMode || 'snapshot').toLowerCase();
+        return modeFilter === 'all' || mode === modeFilter;
+      });
+
+      const tbody = document.getElementById('runs-tbody');
+      if (filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; color: var(--muted); padding: 24px;">No pipeline runs recorded yet for this filter.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = filtered.map(r => {
+        const mode = (r.releaseMode || 'snapshot').toLowerCase();
+        const st = r.stages || {};
+        const stageBadges = ['build', 'deployGarden', 'deploySeed', 'deployShoot', 'testShoot', 'teardown', 'publish']
+          .map(k => `<span class="badge ${st[k] || 'unknown'}" title="${k}: ${st[k] || 'unknown'}">${(st[k] || '-')[0]}</span>`)
+          .join(' ');
+        const comp = r.components || {};
+        return `<tr>
+          <td><a href="${r.runUrl}" target="_blank" rel="noopener">#${r.runNumber}</a></td>
+          <td>${r.timestamp}</td>
+          <td><span class="badge ${mode}">${mode}</span></td>
+          <td><code>${r.trigger}</code> (@${r.actor})</td>
+          <td><span class="badge ${r.status}">${r.status}</span></td>
+          <td><code>${r.artifactsVersion || '-'}</code></td>
+          <td><code>${comp.extensionProviderGDC || '-'}</code> / <code>${comp.mcmProviderGDC || '-'}</code> / <code>${comp.cloudProviderGDC || '-'}</code> / <code>${comp.externalDNS || '-'}</code></td>
+          <td>${stageBadges}</td>
+          <td>${r.duration || 'N/A'}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function loadDashboard() {
+      let recordedRuns = [];
+      try {
+        const res = await fetch('./data/runs.json');
+        if (res.ok) {
+          recordedRuns = await res.json();
+        }
+      } catch (e) {
+        console.warn('Could not load local runs.json:', e);
+      }
+
+      let apiRuns = [];
+      try {
+        const apiRes = await fetch('https://api.github.com/repos/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml/runs?per_page=30');
+        if (apiRes.ok) {
+          const data = await apiRes.json();
+          const recordedIds = new Set(recordedRuns.map(r => String(r.runId)));
+          apiRuns = (data.workflow_runs || [])
+            .filter(w => !recordedIds.has(String(w.id)))
+            .map(w => ({
+              runId: String(w.id),
+              runNumber: String(w.run_number),
+              timestamp: w.created_at,
+              trigger: w.event,
+              releaseMode: 'snapshot',
+              actor: (w.actor && w.actor.login) || 'github-actions',
+              status: w.status === 'completed' ? (w.conclusion || 'unknown') : w.status,
+              duration: 'N/A',
+              artifactsVersion: w.head_sha ? w.head_sha.slice(0, 7) : '-',
+              runUrl: w.html_url,
+              components: {},
+              stages: {}
+            }));
+        }
+      } catch (e) {
+        console.warn('Could not fetch live workflow runs from GitHub API:', e);
+      }
+
+      allRuns = [...recordedRuns, ...apiRuns];
+      document.getElementById('kpi-total').textContent = allRuns.length;
+
+      const completed = allRuns.filter(r => r.status === 'success' || r.status === 'failure');
+      const passed = allRuns.filter(r => r.status === 'success');
+      const passRate = completed.length ? Math.round((passed.length / completed.length) * 100) + '%' : '-';
+      document.getElementById('kpi-pass-rate').textContent = passRate;
+
+      const passedReleases = passed.filter(r => (r.releaseMode || '').toLowerCase() === 'release');
+      const passedSnapshots = passed.filter(r => (r.releaseMode || 'snapshot').toLowerCase() === 'snapshot');
+      document.getElementById('kpi-latest-release').textContent =
+        passedReleases.length ? passedReleases[0].artifactsVersion : 'None';
+      document.getElementById('kpi-latest-snapshot').textContent =
+        passedSnapshots.length ? passedSnapshots[0].artifactsVersion : 'None';
+
+      const stageOrder = [
+        ['build', '1. Build (GHCR)'],
+        ['deployGarden', '3. Virtual Garden'],
+        ['deploySeed', '4. GDC Seed'],
+        ['deployShoot', '5. GDC Shoot'],
+        ['testShoot', '6. E2E & Conformance'],
+        ['teardown', '7. Teardown'],
+        ['publish', '8. Publish Artifacts']
+      ];
+
+      const latestStagesEl = document.getElementById('latest-stages');
+      if (allRuns.length > 0) {
+        const latest = allRuns[0];
+        latestStagesEl.innerHTML = stageOrder.map(([key, label]) => {
+          const st = (latest.stages && latest.stages[key]) || latest.status || 'unknown';
+          return `<div class="stage-pill"><span>${label}</span><span class="badge ${st}">${st}</span></div>`;
+        }).join('');
+      } else {
+        latestStagesEl.innerHTML = stageOrder.map(([, label]) =>
+          `<div class="stage-pill"><span>${label}</span><span class="badge unknown">idle</span></div>`
+        ).join('');
+      }
+
+      renderTable();
+    }
+
+    document.getElementById('mode-filter').addEventListener('change', renderTable);
+    loadDashboard().catch(console.error);
+  </script>
+</body>
+</html>
