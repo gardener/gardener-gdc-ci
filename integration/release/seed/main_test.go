@@ -35,6 +35,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -506,6 +508,8 @@ func deployGardenlet(ctx context.Context, releaseConfigData *config.ReleaseTestC
 		return fmt.Errorf("failed to get shoot kubeconfig path: %w", err)
 	}
 
+	suppressRemoteShootTargetVPA(ctx, releaseConfigData)
+
 	// Install helm chart
 	opts := helm.InstallOptions{
 		ChartPath:      seedData.GardenletChartURL,
@@ -519,6 +523,90 @@ func deployGardenlet(ctx context.Context, releaseConfigData *config.ReleaseTestC
 		return fmt.Errorf("failed to install or upgrade gardenlet: %w", err)
 	}
 	return nil
+}
+
+// suppressRemoteShootTargetVPA disables the host Shoot's target VPA bindings on a Shooted Seed
+// so the host VUC's vpa-recommender (which has a stale CRD discovery cache across Seed teardowns)
+// cannot overwrite Seed VPA status (e.g. garden/prometheus-seed ConfigUnsupported=True) or block Seed teardown.
+func suppressRemoteShootTargetVPA(ctx context.Context, releaseConfigData *config.ReleaseTestConfig) {
+	if releaseConfigData == nil || releaseConfigData.Seed == nil || releaseConfigData.Seed.HostCluster == nil || releaseConfigData.Seed.HostCluster.Shoot == nil {
+		return
+	}
+	remoteShootCluster := releaseConfigData.Seed.HostCluster.Shoot
+	if remoteShootCluster.VirtualGarden == nil {
+		return
+	}
+	shootKey := client.ObjectKey{Name: remoteShootCluster.Name, Namespace: remoteShootCluster.Namespace}
+
+	if releaseConfigData != nil && releaseConfigData.GDC != nil && releaseConfigData.GDCClient != nil {
+		if userClusterClients, err := config.GetGDCUserClusterClients(releaseConfigData.GDC.UserClusters, releaseConfigData.GDCClient); err == nil {
+			shootNamespace := fmt.Sprintf("shoot--%s--%s", shootKey.Namespace, shootKey.Name)
+			for _, ucClient := range userClusterClients {
+				mr := &unstructured.Unstructured{}
+				mr.SetGroupVersionKind(schema.GroupVersionKind{
+					Group:   "resources.gardener.cloud",
+					Version: "v1alpha1",
+					Kind:    "ManagedResource",
+				})
+				if err := ucClient.Get(ctx, client.ObjectKey{Name: "shoot-core-vpa", Namespace: shootNamespace}, mr); err == nil {
+					ann := mr.GetAnnotations()
+					if ann == nil {
+						ann = make(map[string]string)
+					}
+					ann["resources.gardener.cloud/ignore"] = "true"
+					mr.SetAnnotations(ann)
+					_ = ucClient.Update(ctx, mr)
+				}
+			}
+		}
+	}
+
+	shootClients, err := gardener.NewShootClient(ctx, remoteShootCluster.VirtualGarden.Client, shootKey)
+	if err != nil || shootClients == nil || shootClients.WatchClient == nil {
+		return
+	}
+	targetClient := shootClients.WatchClient
+
+	crb := &unstructured.Unstructured{}
+	crb.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "rbac.authorization.k8s.io",
+		Version: "v1",
+		Kind:    "ClusterRoleBinding",
+	})
+	if err := targetClient.Get(ctx, client.ObjectKey{Name: "gardener.cloud:target:resource-manager"}, crb); err == nil {
+		unstructured.RemoveNestedField(crb.Object, "subjects")
+		_ = targetClient.Update(ctx, crb)
+	}
+
+	targetVPACRBs := []string{
+		"gardener.cloud:vpa:target:actor",
+		"gardener.cloud:vpa:target:admission-controller",
+		"gardener.cloud:vpa:target:checkpoint-actor",
+		"gardener.cloud:vpa:target:evictioner",
+		"gardener.cloud:vpa:target:metrics-reader",
+		"gardener.cloud:vpa:target:status-actor",
+		"gardener.cloud:vpa:target:target-reader",
+		"gardener.cloud:vpa:target:vpa-updater-in-place-binding",
+	}
+	for _, name := range targetVPACRBs {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "rbac.authorization.k8s.io",
+			Version: "v1",
+			Kind:    "ClusterRoleBinding",
+		})
+		obj.SetName(name)
+		_ = targetClient.Delete(ctx, obj)
+	}
+
+	mwc := &unstructured.Unstructured{}
+	mwc.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "admissionregistration.k8s.io",
+		Version: "v1",
+		Kind:    "MutatingWebhookConfiguration",
+	})
+	mwc.SetName("vpa-webhook-config-target")
+	_ = targetClient.Delete(ctx, mwc)
 }
 
 // prepareGardenletHelmValues creates the configuration data and generates the Helm values

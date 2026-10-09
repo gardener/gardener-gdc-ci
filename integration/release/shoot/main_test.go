@@ -233,13 +233,15 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 			pvcList := &corev1.PersistentVolumeClaimList{}
 			if err := seedClient.List(ctx, pvcList, client.InNamespace(shootNamespace)); err == nil {
 				for _, item := range pvcList.Items {
-					if item.Annotations["cdi.kubevirt.io/storage.usePopulator"] != "false" {
+					if item.Annotations["cdi.kubevirt.io/storage.usePopulator"] != "false" ||
+						item.Annotations["cdi.kubevirt.io/storage.bind.immediate.requested"] != "true" {
 						pvc := item
 						patch := client.MergeFrom(pvc.DeepCopy())
 						if pvc.Annotations == nil {
 							pvc.Annotations = make(map[string]string)
 						}
 						pvc.Annotations["cdi.kubevirt.io/storage.usePopulator"] = "false"
+						pvc.Annotations["cdi.kubevirt.io/storage.bind.immediate.requested"] = "true"
 						_ = seedClient.Patch(ctx, &pvc, patch)
 					}
 				}
