@@ -284,6 +284,13 @@ func TestCleanupResources(t *testing.T) {
 				} else if len(seedList.Items) == 0 {
 					t.Log("No Seed resources found on Virtual Garden to delete.")
 				} else {
+					if isRemoteShoot {
+						restoreVPA := suppressRemoteShootVPAManagedResource(ctx, t, targetWatchClient, releasePipelineCfg, remoteShootKey)
+						defer restoreVPA()
+					}
+					if targetWatchClient != nil {
+						cleanupStaleSeedManagedResources(ctx, t, targetWatchClient, seedList.Items)
+					}
 					for _, seedItem := range seedList.Items {
 						seed := seedItem
 						seedKey := client.ObjectKey{Name: seed.Name}
@@ -1303,5 +1310,123 @@ func deleteGardenletDeployment(ctx context.Context, t *testing.T, targetClient c
 		t.Logf("Warning: Failed to wait for gardenlet deployment deletion on %s: %v", clusterName, err)
 	} else {
 		t.Logf("Gardenlet deployment deleted and confirmed gone successfully on %s.", clusterName)
+	}
+}
+
+func suppressRemoteShootVPAManagedResource(ctx context.Context, t *testing.T, targetWatchClient client.Client, releaseConfigData *pkgConfig.ReleaseTestConfig, remoteShootKey client.ObjectKey) func() {
+	var cleanups []func()
+
+	if targetWatchClient != nil {
+		crb := &unstructured.Unstructured{}
+		crb.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "rbac.authorization.k8s.io",
+			Version: "v1",
+			Kind:    "ClusterRoleBinding",
+		})
+		crbKey := client.ObjectKey{Name: "gardener.cloud:target:resource-manager"}
+		if err := targetWatchClient.Get(ctx, crbKey, crb); err == nil {
+			origSubjects, hasSubjects, _ := unstructured.NestedSlice(crb.Object, "subjects")
+			if hasSubjects && len(origSubjects) > 0 {
+				unstructured.RemoveNestedField(crb.Object, "subjects")
+				if updateErr := targetWatchClient.Update(ctx, crb); updateErr == nil {
+					t.Logf("Temporarily suspended ClusterRoleBinding %s on remote Shoot %s during Seed deletion", crbKey.Name, remoteShootKey)
+					cleanups = append(cleanups, func() {
+						latestCRB := &unstructured.Unstructured{}
+						latestCRB.SetGroupVersionKind(schema.GroupVersionKind{
+							Group:   "rbac.authorization.k8s.io",
+							Version: "v1",
+							Kind:    "ClusterRoleBinding",
+						})
+						if getErr := targetWatchClient.Get(ctx, crbKey, latestCRB); getErr == nil {
+							_ = unstructured.SetNestedSlice(latestCRB.Object, origSubjects, "subjects")
+							if restoreErr := targetWatchClient.Update(ctx, latestCRB); restoreErr != nil {
+								t.Logf("Warning: Failed to restore subjects on ClusterRoleBinding %s: %v", crbKey.Name, restoreErr)
+							} else {
+								t.Logf("Restored subjects on ClusterRoleBinding %s after Seed deletion", crbKey.Name)
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+
+	if releaseConfigData != nil && releaseConfigData.GDC != nil && releaseConfigData.GDCClient != nil {
+		if userClusterClients, err := pkgConfig.GetGDCUserClusterClients(releaseConfigData.GDC.UserClusters, releaseConfigData.GDCClient); err == nil {
+			shootNamespace := fmt.Sprintf("shoot--%s--%s", remoteShootKey.Namespace, remoteShootKey.Name)
+			for clusterName, ucClient := range userClusterClients {
+				mr := &unstructured.Unstructured{}
+				mr.SetGroupVersionKind(schema.GroupVersionKind{
+					Group:   "resources.gardener.cloud",
+					Version: "v1alpha1",
+					Kind:    "ManagedResource",
+				})
+				mrKey := client.ObjectKey{Name: "shoot-core-vpa", Namespace: shootNamespace}
+				if err := ucClient.Get(ctx, mrKey, mr); err != nil {
+					continue
+				}
+				ann := mr.GetAnnotations()
+				if ann == nil {
+					ann = make(map[string]string)
+				}
+				ann["resources.gardener.cloud/ignore"] = "true"
+				mr.SetAnnotations(ann)
+				if err := ucClient.Update(ctx, mr); err == nil {
+					t.Logf("Temporarily set resources.gardener.cloud/ignore=true on %s/shoot-core-vpa in %s during Seed deletion", shootNamespace, clusterName)
+					targetUCClient := ucClient
+					targetClusterName := clusterName
+					cleanups = append(cleanups, func() {
+						latestMR := &unstructured.Unstructured{}
+						latestMR.SetGroupVersionKind(schema.GroupVersionKind{
+							Group:   "resources.gardener.cloud",
+							Version: "v1alpha1",
+							Kind:    "ManagedResource",
+						})
+						if err := targetUCClient.Get(ctx, mrKey, latestMR); err != nil {
+							return
+						}
+						latestAnn := latestMR.GetAnnotations()
+						if latestAnn != nil {
+							delete(latestAnn, "resources.gardener.cloud/ignore")
+							latestMR.SetAnnotations(latestAnn)
+							_ = targetUCClient.Update(ctx, latestMR)
+							t.Logf("Restored %s/shoot-core-vpa reconciliation in %s after Seed deletion", shootNamespace, targetClusterName)
+						}
+					})
+				}
+			}
+		}
+	}
+
+	return func() {
+		for _, fn := range cleanups {
+			fn()
+		}
+	}
+}
+
+func cleanupStaleSeedManagedResources(ctx context.Context, t *testing.T, seedClient client.Client, activeSeeds []gardencorev1beta1.Seed) {
+	activeNames := make(map[string]bool, len(activeSeeds))
+	for _, s := range activeSeeds {
+		activeNames["referenced-resources-"+s.Name] = true
+	}
+	mrList := &unstructured.UnstructuredList{}
+	mrList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "resources.gardener.cloud",
+		Version: "v1alpha1",
+		Kind:    "ManagedResourceList",
+	})
+	if err := seedClient.List(ctx, mrList, client.InNamespace(gardenv1beta1constants.GardenNamespace)); err != nil {
+		return
+	}
+	for _, item := range mrList.Items {
+		name := item.GetName()
+		if strings.HasPrefix(name, "referenced-resources-seed-") && !activeNames[name] {
+			mr := item
+			t.Logf("Removing stale ManagedResource %s/%s before Seed deletion", mr.GetNamespace(), name)
+			mr.SetFinalizers(nil)
+			_ = seedClient.Update(ctx, &mr)
+			_ = seedClient.Delete(ctx, &mr)
+		}
 	}
 }
