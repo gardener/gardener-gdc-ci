@@ -37,12 +37,14 @@ STAGE_PUBLISH="${STAGE_PUBLISH_STATUS:-skipped}"
 OVERALL_STATUS="${OVERALL_PIPELINE_STATUS:-failure}"
 DURATION="${PIPELINE_DURATION:-N/A}"
 
+RELEASE_MODE_VAL="${RELEASE_MODE:-snapshot}"
 ARTIFACTS_VERSION="unknown"
 EXT_SHA="N/A"
 MCM_GDC_SHA="N/A"
 DNS_SHA="N/A"
 CCM_GDC_SHA="N/A"
 if [[ -f "${RELEASE_METADATA_FILE}" ]]; then
+  RELEASE_MODE_VAL="$(yq -r '.releaseMode // "snapshot"' "${RELEASE_METADATA_FILE}")"
   ARTIFACTS_VERSION="$(yq -r '.gardenerArtifactsVersion // "unknown"' "${RELEASE_METADATA_FILE}")"
   EXT_SHA="$(yq -r '.components.gardenerExtensionProviderGDC.commitSHA // "N/A"' "${RELEASE_METADATA_FILE}")"
   MCM_GDC_SHA="$(yq -r '.components.machineControllerManagerProviderGDC.commitSHA // "N/A"' "${RELEASE_METADATA_FILE}")"
@@ -55,6 +57,7 @@ NEW_ENTRY="$(jq -n \
   --arg runNumber "${RUN_NUMBER}" \
   --arg timestamp "${TIMESTAMP}" \
   --arg trigger "${TRIGGER_EVENT}" \
+  --arg releaseMode "${RELEASE_MODE_VAL}" \
   --arg actor "${ACTOR}" \
   --arg status "${OVERALL_STATUS}" \
   --arg duration "${DURATION}" \
@@ -77,6 +80,7 @@ NEW_ENTRY="$(jq -n \
     runNumber: $runNumber,
     timestamp: $timestamp,
     trigger: $trigger,
+    releaseMode: $releaseMode,
     actor: $actor,
     status: $status,
     duration: $duration,
@@ -100,9 +104,34 @@ NEW_ENTRY="$(jq -n \
     }
   }')"
 
+# Fetch latest runs.json from gh-pages if available so history persists across runs
+if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+  git fetch origin gh-pages:refs/remotes/origin/gh-pages >/dev/null 2>&1 || true
+  if git show origin/gh-pages:data/runs.json > "${DASHBOARD_DATA_FILE}.remote" 2>/dev/null; then
+    mv "${DASHBOARD_DATA_FILE}.remote" "${DASHBOARD_DATA_FILE}"
+  fi
+fi
+
 # Prepend the latest run and retain the most recent 100 runs
-jq --argjson entry "${NEW_ENTRY}" '[$entry] + . | .[:100]' "${DASHBOARD_DATA_FILE}" > "${DASHBOARD_DATA_FILE}.tmp"
+jq --argjson entry "${NEW_ENTRY}" '[$entry] + . | unique_by(.runId) | .[:100]' "${DASHBOARD_DATA_FILE}" > "${DASHBOARD_DATA_FILE}.tmp"
 mv "${DASHBOARD_DATA_FILE}.tmp" "${DASHBOARD_DATA_FILE}"
+
+# Publish updated dashboard and runs.json to gh-pages branch when running on main
+if [[ "${GITHUB_REF:-}" == "refs/heads/main" && -z "${PR_NUMBER:-}" && -n "${GH_TOKEN:-}" ]]; then
+  PAGES_WORK_DIR="$(mktemp -d)"
+  if git clone --branch gh-pages "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY:-gardener/gardener-gdc-ci}.git" "${PAGES_WORK_DIR}" >/dev/null 2>&1; then
+    cp -r "${REPO_ROOT}/dashboard/"* "${PAGES_WORK_DIR}/"
+    touch "${PAGES_WORK_DIR}/.nojekyll"
+    git -C "${PAGES_WORK_DIR}" config user.name "github-actions[bot]"
+    git -C "${PAGES_WORK_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    git -C "${PAGES_WORK_DIR}" add .
+    if ! git -C "${PAGES_WORK_DIR}" diff --cached --quiet; then
+      git -C "${PAGES_WORK_DIR}" commit -m "chore(dashboard): record ${RELEASE_MODE_VAL} run #${RUN_NUMBER}" >/dev/null 2>&1
+      git -C "${PAGES_WORK_DIR}" push origin gh-pages >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -rf "${PAGES_WORK_DIR}"
+fi
 
 # Write GitHub Actions Job Summary if running in GitHub Actions
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
@@ -113,6 +142,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 | :--- | :--- |
 | **Overall Status** | \`${OVERALL_STATUS}\` |
 | **Trigger** | \`${TRIGGER_EVENT}\` (by \`@${ACTOR}\`) |
+| **Release Mode** | \`${RELEASE_MODE_VAL}\` |
 | **Artifacts Version** | \`${ARTIFACTS_VERSION}\` |
 | **Extension Provider GDC SHA** | \`${EXT_SHA}\` |
 | **MCM Provider GDC SHA** | \`${MCM_GDC_SHA}\` |
@@ -120,6 +150,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 | **Cloud Provider GDC SHA** | \`${CCM_GDC_SHA}\` |
 | **Candidate Registry** | \`${GHCR_REGISTRY}\` |
 | **Public Registry** | \`${PUBLIC_REGISTRY}\` |
+| **Release Dashboard** | [https://gardener.github.io/gardener-gdc-ci/](https://gardener.github.io/gardener-gdc-ci/) |
 
 ### Stage Progress
 

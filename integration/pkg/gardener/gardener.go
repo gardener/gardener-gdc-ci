@@ -35,6 +35,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -96,15 +97,18 @@ func CreateImagePullSecret(ctx context.Context, kubeClient client.WithWatch, cre
 			Namespace: gardenv1beta1constants.GardenNamespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, secret, func() error {
-		secret.Labels = map[string]string{
-			gardenv1beta1constants.GardenRole: gardenv1beta1constants.GardenRoleHelmPullSecret,
-		}
-		secret.Type = corev1.SecretTypeDockerConfigJson
-		secret.Data = map[string][]byte{
-			corev1.DockerConfigJsonKey: credentialData,
-		}
-		return nil
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, updateErr := controllerutil.CreateOrUpdate(ctx, kubeClient, secret, func() error {
+			secret.Labels = map[string]string{
+				gardenv1beta1constants.GardenRole: gardenv1beta1constants.GardenRoleHelmPullSecret,
+			}
+			secret.Type = corev1.SecretTypeDockerConfigJson
+			secret.Data = map[string][]byte{
+				corev1.DockerConfigJsonKey: credentialData,
+			}
+			return nil
+		})
+		return updateErr
 	})
 
 	if err != nil {
@@ -206,17 +210,20 @@ func DeployExtension(ctx context.Context, gardenClient client.WithWatch, config 
 		},
 	}
 
-	_, err = controllerutil.CreateOrUpdate(ctx, gardenClient, controllerDeployment, func() error {
-		controllerDeployment.Helm = &gardencorev1.HelmControllerDeployment{
-			OCIRepository: &gardencorev1.OCIRepository{
-				Ref: config.HelmChartRef,
-				PullSecretRef: &corev1.LocalObjectReference{
-					Name: config.ImagePullSecretName,
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, updateErr := controllerutil.CreateOrUpdate(ctx, gardenClient, controllerDeployment, func() error {
+			controllerDeployment.Helm = &gardencorev1.HelmControllerDeployment{
+				OCIRepository: &gardencorev1.OCIRepository{
+					Ref: config.HelmChartRef,
+					PullSecretRef: &corev1.LocalObjectReference{
+						Name: config.ImagePullSecretName,
+					},
 				},
-			},
-			Values: &apiextensionsv1.JSON{Raw: valuesBytes},
-		}
-		return nil
+				Values: &apiextensionsv1.JSON{Raw: valuesBytes},
+			}
+			return nil
+		})
+		return updateErr
 	})
 
 	if err != nil {
@@ -230,19 +237,22 @@ func DeployExtension(ctx context.Context, gardenClient client.WithWatch, config 
 		},
 	}
 
-	_, err = controllerutil.CreateOrUpdate(ctx, gardenClient, controllerRegistration, func() error {
-		controllerRegistration.Spec = gardencorev1beta1.ControllerRegistrationSpec{
-			Deployment: &gardencorev1beta1.ControllerRegistrationDeployment{
-				DeploymentRefs: []gardencorev1beta1.DeploymentRef{
-					{
-						Name: config.Name,
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, updateErr := controllerutil.CreateOrUpdate(ctx, gardenClient, controllerRegistration, func() error {
+			controllerRegistration.Spec = gardencorev1beta1.ControllerRegistrationSpec{
+				Deployment: &gardencorev1beta1.ControllerRegistrationDeployment{
+					DeploymentRefs: []gardencorev1beta1.DeploymentRef{
+						{
+							Name: config.Name,
+						},
 					},
+					Policy: ptr.To(gardencorev1beta1.ControllerDeploymentPolicyAlways),
 				},
-				Policy: ptr.To(gardencorev1beta1.ControllerDeploymentPolicyAlways),
-			},
-			Resources: config.Resources,
-		}
-		return nil
+				Resources: config.Resources,
+			}
+			return nil
+		})
+		return updateErr
 	})
 
 	if err != nil {
@@ -272,58 +282,62 @@ func DeployOperatorExtension(ctx context.Context, runtimeClusterClient client.Wi
 			Name: config.Name,
 		},
 	}
-	_, err = controllerutil.CreateOrUpdate(ctx, runtimeClusterClient, extopDeployment, func() error {
-		extopDeployment.Spec = operatorv1alpha1.ExtensionSpec{
-			Deployment: &operatorv1alpha1.Deployment{
-				AdmissionDeployment: &operatorv1alpha1.AdmissionDeploymentSpec{
-					RuntimeCluster: &operatorv1alpha1.DeploymentSpec{
-						Helm: &operatorv1alpha1.ExtensionHelm{
-							OCIRepository: &gardencorev1.OCIRepository{
-								Ref: config.AdmissionRuntimeHelmChartRef,
-								PullSecretRef: &corev1.LocalObjectReference{
-									Name: config.ImagePullSecretName,
+	// Retry on optimistic concurrency conflicts (409) when gardener-operator concurrently updates Extension status/finalizers.
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, updateErr := controllerutil.CreateOrUpdate(ctx, runtimeClusterClient, extopDeployment, func() error {
+			extopDeployment.Spec = operatorv1alpha1.ExtensionSpec{
+				Deployment: &operatorv1alpha1.Deployment{
+					AdmissionDeployment: &operatorv1alpha1.AdmissionDeploymentSpec{
+						RuntimeCluster: &operatorv1alpha1.DeploymentSpec{
+							Helm: &operatorv1alpha1.ExtensionHelm{
+								OCIRepository: &gardencorev1.OCIRepository{
+									Ref: config.AdmissionRuntimeHelmChartRef,
+									PullSecretRef: &corev1.LocalObjectReference{
+										Name: config.ImagePullSecretName,
+									},
+								},
+							},
+						},
+						Values: &apiextensionsv1.JSON{Raw: admissionValuesBytes},
+						VirtualCluster: &operatorv1alpha1.DeploymentSpec{
+							Helm: &operatorv1alpha1.ExtensionHelm{
+								OCIRepository: &gardencorev1.OCIRepository{
+									Ref: config.AdmissionApplicationHelmChartRef,
+									PullSecretRef: &corev1.LocalObjectReference{
+										Name: config.ImagePullSecretName,
+									},
 								},
 							},
 						},
 					},
-					Values: &apiextensionsv1.JSON{Raw: admissionValuesBytes},
-					VirtualCluster: &operatorv1alpha1.DeploymentSpec{
-						Helm: &operatorv1alpha1.ExtensionHelm{
-							OCIRepository: &gardencorev1.OCIRepository{
-								Ref: config.AdmissionApplicationHelmChartRef,
-								PullSecretRef: &corev1.LocalObjectReference{
-									Name: config.ImagePullSecretName,
+					ExtensionDeployment: &operatorv1alpha1.ExtensionDeploymentSpec{
+						DeploymentSpec: operatorv1alpha1.DeploymentSpec{
+							Helm: &operatorv1alpha1.ExtensionHelm{
+								OCIRepository: &gardencorev1.OCIRepository{
+									Ref: config.ExtensionProviderHelmChartRef,
+									PullSecretRef: &corev1.LocalObjectReference{
+										Name: config.ImagePullSecretName,
+									},
 								},
 							},
 						},
+						InjectGardenKubeconfig: ptr.To(true),
+						RuntimeClusterValues:   &apiextensionsv1.JSON{Raw: extensionProviderRuntimeValuesBytes},
+						Values:                 &apiextensionsv1.JSON{Raw: extensionProviderHelmChartValuesBytes},
 					},
 				},
-				ExtensionDeployment: &operatorv1alpha1.ExtensionDeploymentSpec{
-					DeploymentSpec: operatorv1alpha1.DeploymentSpec{
-						Helm: &operatorv1alpha1.ExtensionHelm{
-							OCIRepository: &gardencorev1.OCIRepository{
-								Ref: config.ExtensionProviderHelmChartRef,
-								PullSecretRef: &corev1.LocalObjectReference{
-									Name: config.ImagePullSecretName,
-								},
-							},
-						},
-					},
-					InjectGardenKubeconfig: ptr.To(true),
-					RuntimeClusterValues:   &apiextensionsv1.JSON{Raw: extensionProviderRuntimeValuesBytes},
-					Values:                 &apiextensionsv1.JSON{Raw: extensionProviderHelmChartValuesBytes},
+				Resources: []gardencorev1beta1.ControllerResource{
+					{Kind: "Infrastructure", Type: "gdch", Primary: ptr.To(true)},
+					{Kind: "ControlPlane", Type: "gdch", Primary: ptr.To(true)},
+					{Kind: "Worker", Type: "gdch", Primary: ptr.To(true)},
+					{Kind: "BackupEntry", Type: "gdch", Primary: ptr.To(true)},
+					{Kind: "BackupBucket", Type: "gdch", Primary: ptr.To(true)},
+					{Kind: "DNSRecord", Type: "gdch-dns", Primary: ptr.To(true)},
 				},
-			},
-			Resources: []gardencorev1beta1.ControllerResource{
-				{Kind: "Infrastructure", Type: "gdch", Primary: ptr.To(true)},
-				{Kind: "ControlPlane", Type: "gdch", Primary: ptr.To(true)},
-				{Kind: "Worker", Type: "gdch", Primary: ptr.To(true)},
-				{Kind: "BackupEntry", Type: "gdch", Primary: ptr.To(true)},
-				{Kind: "BackupBucket", Type: "gdch", Primary: ptr.To(true)},
-				{Kind: "DNSRecord", Type: "gdch-dns", Primary: ptr.To(true)},
-			},
-		}
-		return nil
+			}
+			return nil
+		})
+		return updateErr
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create or update extop deployment for %s extension: %v", config.Name, err)
@@ -350,12 +364,13 @@ func UpdateShoot(ctx context.Context, gardenClient client.Client, shootKey clien
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, gardenClient, shoot, func() error {
-		mutate(shoot)
-		return nil
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, gardenClient, shoot, func() error {
+			mutate(shoot)
+			return nil
+		})
+		return err
 	})
-
-	return err
 }
 
 // GetShootKubeconfig requests the admin kubeconfig for a Shoot and returns it as raw bytes.

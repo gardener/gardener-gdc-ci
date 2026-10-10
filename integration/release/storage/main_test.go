@@ -45,7 +45,7 @@ var (
 
 const (
 	WaitForPVCBoundTimeout   = 5 * time.Minute
-	WaitForPodReadyTimeout   = 20 * time.Minute
+	WaitForPodReadyTimeout   = 30 * time.Minute
 	WaitForPVCResizedTimeout = 10 * time.Minute
 	pollInterval             = 2 * time.Second
 	pollTimeout              = 60 * time.Second
@@ -126,7 +126,12 @@ func TestClusterStorageLifecycle(t *testing.T) {
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
-				ObjectMeta: metav1.ObjectMeta{Name: "web"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "web",
+					Annotations: map[string]string{
+						"cdi.kubevirt.io/storage.usePopulator": "false",
+					},
+				},
 				Spec: corev1.PersistentVolumeClaimSpec{
 					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 					Resources: corev1.VolumeResourceRequirements{

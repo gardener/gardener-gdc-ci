@@ -288,10 +288,6 @@ func newExternalDNSExtensionConfig(t *testing.T, cfg *config.ReleaseTestConfig, 
 
 	useNextGen := true
 	imageNameOverwrite := "dns-controller-manager-next-generation"
-	if externalDNSManagementImageName == "external-dns-management-gdch" {
-		useNextGen = false
-		imageNameOverwrite = "dns-controller-manager"
-	}
 
 	return &gardener.ExtensionConfig{
 		Name:                "extension-shoot-dns-service",

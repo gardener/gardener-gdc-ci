@@ -27,6 +27,7 @@ import (
 	securityv1alpha1 "github.com/gardener/gardener/pkg/apis/security/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -42,7 +43,7 @@ import (
 var (
 	gardenerArtifactsVersion       = flag.String("gardener-artifacts-version", "", "The short artifacts version for gardener repo")
 	externalDNSArtifactsVersion    = flag.String("external-dns-artifacts-version", "", "The short artifacts version for external-dns-management repo")
-	externalDNSManagementImageName = flag.String("external-dns-management-image-name", "external-dns-management-gdch", "The name of the external DNS management image")
+	externalDNSManagementImageName = flag.String("external-dns-management-image-name", "external-dnsman2-gdch", "The name of the external DNS management image")
 	releaseConfigurationFilePath   = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
 	virtualGardenProvider          = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 )
@@ -162,9 +163,96 @@ func createShoot(ctx context.Context, gardenClient client.WithWatch, cfg *config
 		t.Fatalf("failed to create or update shoot %q/%q: %v", shoot.Namespace, shoot.Name, err)
 	}
 	shootKey := client.ObjectKey{Name: cfg.TestShoot.Name, Namespace: gardenv1beta1constants.GardenNamespace}
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+	go ensureSeedShootNamespaceWorkarounds(watchCtx, t, cfg, shootKey)
+
 	err = gardener.WaitForShootReconciliation(ctx, gardenClient, shootKey, waitForShootCreationTimeout)
 	if err != nil {
 		t.Fatalf("shoot \"%q/%q\" reconciliation failed or timed out: %v", shoot.Namespace, shoot.Name, err)
+	}
+}
+
+// ensureSeedShootNamespaceWorkarounds applies Seed-level workarounds in the Shoot's control-plane namespace:
+//  1. Creates NetworkPolicy/allow-all-etcd so Cilium VXLAN on KubeVirt Seed nodes does not drop cross-node etcd peer traffic (2380) during bootstrap.
+//  2. Annotates Shoot control-plane PVCs with cdi.kubevirt.io/storage.usePopulator=false and cdi.kubevirt.io/storage.bind.immediate.requested=true
+//     so KubeVirt CSI DataVolumes on the infra cluster bind immediately without deadlocking on CDI VolumeBlankSource populators under WaitForFirstConsumer.
+func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg *config.ReleaseTestConfig, shootKey client.ObjectKey) {
+	if cfg == nil || cfg.Seed == nil || cfg.Seed.HostCluster == nil {
+		return
+	}
+	var seedClient client.Client
+	if cfg.Seed.HostCluster.UserClusterClient != nil {
+		seedClient = cfg.Seed.HostCluster.UserClusterClient
+	} else if cfg.Seed.HostCluster.Shoot != nil && cfg.Seed.HostCluster.Shoot.VirtualGarden != nil {
+		remoteShoot := cfg.Seed.HostCluster.Shoot
+		remoteShootKey := client.ObjectKey{Name: remoteShoot.Name, Namespace: remoteShoot.Namespace}
+		shootClients, err := gardener.NewShootClient(ctx, remoteShoot.VirtualGarden.Client, remoteShootKey)
+		if err != nil {
+			t.Logf("Warning: Could not create Seed client for Shoot namespace workarounds: %v", err)
+			return
+		}
+		seedClient = shootClients.WatchClient
+	}
+	if seedClient == nil {
+		return
+	}
+
+	shootNamespace := "shoot--" + shootKey.Namespace + "--" + shootKey.Name
+	netpolCreated := false
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ns := &corev1.Namespace{}
+			if err := seedClient.Get(ctx, client.ObjectKey{Name: shootNamespace}, ns); err != nil {
+				continue
+			}
+
+			// Allow cross-node etcd peer communication during initial 3-node etcd cluster bootstrap on KubeVirt Seeds.
+			if !netpolCreated {
+				np := &networkingv1.NetworkPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "allow-all-etcd",
+						Namespace: shootNamespace,
+					},
+					Spec: networkingv1.NetworkPolicySpec{
+						PodSelector: metav1.LabelSelector{},
+						Ingress:     []networkingv1.NetworkPolicyIngressRule{{}},
+						Egress:      []networkingv1.NetworkPolicyEgressRule{{}},
+						PolicyTypes: []networkingv1.PolicyType{
+							networkingv1.PolicyTypeIngress,
+							networkingv1.PolicyTypeEgress,
+						},
+					},
+				}
+				if err := seedClient.Create(ctx, np); err == nil || apierrors.IsAlreadyExists(err) {
+					netpolCreated = true
+				}
+			}
+
+			// Bypass CDI VolumeBlankSource populator and request immediate binding so KubeVirt hotplug attaches etcd PVCs without stalling.
+			pvcList := &corev1.PersistentVolumeClaimList{}
+			if err := seedClient.List(ctx, pvcList, client.InNamespace(shootNamespace)); err == nil {
+				for _, item := range pvcList.Items {
+					if item.Annotations["cdi.kubevirt.io/storage.usePopulator"] != "false" ||
+						item.Annotations["cdi.kubevirt.io/storage.bind.immediate.requested"] != "true" {
+						pvc := item
+						patch := client.MergeFrom(pvc.DeepCopy())
+						if pvc.Annotations == nil {
+							pvc.Annotations = make(map[string]string)
+						}
+						pvc.Annotations["cdi.kubevirt.io/storage.usePopulator"] = "false"
+						pvc.Annotations["cdi.kubevirt.io/storage.bind.immediate.requested"] = "true"
+						_ = seedClient.Patch(ctx, &pvc, patch)
+					}
+				}
+			}
+		}
 	}
 }
 

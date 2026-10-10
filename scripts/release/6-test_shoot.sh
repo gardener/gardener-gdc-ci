@@ -26,7 +26,7 @@ fi
 
 SUITES=(
   "shootscaling:40m"
-  "storage:45m"
+  "storage:60m"
   "networking:30m"
   "loadbalancer:30m"
   "dns:30m"

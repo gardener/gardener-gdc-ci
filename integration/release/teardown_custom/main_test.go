@@ -284,6 +284,13 @@ func TestCleanupResources(t *testing.T) {
 				} else if len(seedList.Items) == 0 {
 					t.Log("No Seed resources found on Virtual Garden to delete.")
 				} else {
+					if isRemoteShoot {
+						restoreVPA := suppressRemoteShootVPAManagedResource(ctx, t, targetWatchClient, releasePipelineCfg, remoteShootKey)
+						defer restoreVPA()
+					}
+					if targetWatchClient != nil {
+						cleanupStaleSeedManagedResources(ctx, t, targetWatchClient, seedList.Items)
+					}
 					for _, seedItem := range seedList.Items {
 						seed := seedItem
 						seedKey := client.ObjectKey{Name: seed.Name}
@@ -1303,5 +1310,83 @@ func deleteGardenletDeployment(ctx context.Context, t *testing.T, targetClient c
 		t.Logf("Warning: Failed to wait for gardenlet deployment deletion on %s: %v", clusterName, err)
 	} else {
 		t.Logf("Gardenlet deployment deleted and confirmed gone successfully on %s.", clusterName)
+	}
+}
+
+// suppressRemoteShootVPAManagedResource ensures the host Shoot's shoot-core-vpa ManagedResource and target
+// resource-manager RBAC remain suspended on a Shooted Seed so they do not conflict with Seed VPA deletion
+// (gardener.cloud:vpa:target:status-actor) during teardown or overwrite Seed VPA status on subsequent runs.
+func suppressRemoteShootVPAManagedResource(ctx context.Context, t *testing.T, targetWatchClient client.Client, releaseConfigData *pkgConfig.ReleaseTestConfig, remoteShootKey client.ObjectKey) func() {
+	if targetWatchClient != nil {
+		crb := &unstructured.Unstructured{}
+		crb.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "rbac.authorization.k8s.io",
+			Version: "v1",
+			Kind:    "ClusterRoleBinding",
+		})
+		crbKey := client.ObjectKey{Name: "gardener.cloud:target:resource-manager"}
+		if err := targetWatchClient.Get(ctx, crbKey, crb); err == nil {
+			if _, hasSubjects, _ := unstructured.NestedSlice(crb.Object, "subjects"); hasSubjects {
+				unstructured.RemoveNestedField(crb.Object, "subjects")
+				if updateErr := targetWatchClient.Update(ctx, crb); updateErr == nil {
+					t.Logf("Suspended ClusterRoleBinding %s on remote Shoot %s prior to Seed deletion", crbKey.Name, remoteShootKey)
+				}
+			}
+		}
+	}
+
+	if releaseConfigData != nil && releaseConfigData.GDC != nil && releaseConfigData.GDCClient != nil {
+		if userClusterClients, err := pkgConfig.GetGDCUserClusterClients(releaseConfigData.GDC.UserClusters, releaseConfigData.GDCClient); err == nil {
+			shootNamespace := fmt.Sprintf("shoot--%s--%s", remoteShootKey.Namespace, remoteShootKey.Name)
+			for clusterName, ucClient := range userClusterClients {
+				mr := &unstructured.Unstructured{}
+				mr.SetGroupVersionKind(schema.GroupVersionKind{
+					Group:   "resources.gardener.cloud",
+					Version: "v1alpha1",
+					Kind:    "ManagedResource",
+				})
+				mrKey := client.ObjectKey{Name: "shoot-core-vpa", Namespace: shootNamespace}
+				if err := ucClient.Get(ctx, mrKey, mr); err != nil {
+					continue
+				}
+				ann := mr.GetAnnotations()
+				if ann == nil {
+					ann = make(map[string]string)
+				}
+				ann["resources.gardener.cloud/ignore"] = "true"
+				mr.SetAnnotations(ann)
+				if err := ucClient.Update(ctx, mr); err == nil {
+					t.Logf("Set resources.gardener.cloud/ignore=true on %s/shoot-core-vpa in %s prior to Seed deletion", shootNamespace, clusterName)
+				}
+			}
+		}
+	}
+
+	return func() {}
+}
+
+func cleanupStaleSeedManagedResources(ctx context.Context, t *testing.T, seedClient client.Client, activeSeeds []gardencorev1beta1.Seed) {
+	activeNames := make(map[string]bool, len(activeSeeds))
+	for _, s := range activeSeeds {
+		activeNames["referenced-resources-"+s.Name] = true
+	}
+	mrList := &unstructured.UnstructuredList{}
+	mrList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "resources.gardener.cloud",
+		Version: "v1alpha1",
+		Kind:    "ManagedResourceList",
+	})
+	if err := seedClient.List(ctx, mrList, client.InNamespace(gardenv1beta1constants.GardenNamespace)); err != nil {
+		return
+	}
+	for _, item := range mrList.Items {
+		name := item.GetName()
+		if strings.HasPrefix(name, "referenced-resources-seed-") && !activeNames[name] {
+			mr := item
+			t.Logf("Removing stale ManagedResource %s/%s before Seed deletion", mr.GetNamespace(), name)
+			mr.SetFinalizers(nil)
+			_ = seedClient.Update(ctx, &mr)
+			_ = seedClient.Delete(ctx, &mr)
+		}
 	}
 }
