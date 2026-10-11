@@ -28,7 +28,10 @@ SUITES=(
   "shootscaling:40m"
   "storage:60m"
   "networking:30m"
-  "loadbalancer:30m"
+  # TestLoadBalancerServiceLifecycle runs sequential setup + cross-project VM tests (~18-20m)
+  # before parallel ELB<->ILB conversion subtests poll external connectivity (12m timeout).
+  # Use 45m so `go test` never panics at 30m0s and skips `t.Cleanup()` subnet deletion.
+  "loadbalancer:45m"
   "dns:30m"
   "etcdbackup:30m"
 )
