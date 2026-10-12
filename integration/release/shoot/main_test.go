@@ -17,6 +17,7 @@ package shoot
 import (
 	"context"
 	"flag"
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,8 +51,15 @@ var (
 )
 
 const (
-	gardenProjectName           = "garden"
-	waitForShootCreationTimeout = 45 * time.Minute
+	gardenProjectName                   = "garden"
+	waitForShootCreationTimeout         = 45 * time.Minute
+	kubevirtStorageClassName            = "kubevirt"
+	etcdMainStorageSize                 = "25Gi"
+	etcdEventsStorageSize               = "10Gi"
+	etcdMainPVCNameFormat               = "main-etcd-etcd-main-%d"
+	etcdEventsPVCNameFormat             = "etcd-events-etcd-events-%d"
+	cdiUsePopulatorAnnotationKey        = "cdi.kubevirt.io/storage.usePopulator"
+	cdiBindImmediateRequestedAnnotation = "cdi.kubevirt.io/storage.bind.immediate.requested"
 	// subnetPrefixLength is set to /27 (32 IPs).
 	// Rationale for /27:
 	// 1. Capacity: A /27 subnet provides 32 IPs, which splitCIDR divides into /28 (16 IPs)
@@ -175,8 +184,11 @@ func createShoot(ctx context.Context, gardenClient client.WithWatch, cfg *config
 
 // ensureSeedShootNamespaceWorkarounds applies Seed-level workarounds in the Shoot's control-plane namespace:
 //  1. Creates NetworkPolicy/allow-all-etcd so Cilium VXLAN on KubeVirt Seed nodes does not drop cross-node etcd peer traffic (2380) during bootstrap.
-//  2. Annotates Shoot control-plane PVCs with cdi.kubevirt.io/storage.usePopulator=false and cdi.kubevirt.io/storage.bind.immediate.requested=true
-//     so KubeVirt CSI DataVolumes on the infra cluster bind immediately without deadlocking on CDI VolumeBlankSource populators under WaitForFirstConsumer.
+//  2. Pre-creates the 6 etcd-main/etcd-events PVCs with cdi.kubevirt.io/storage.usePopulator="false" and
+//     cdi.kubevirt.io/storage.bind.immediate.requested="true" as soon as the Shoot control-plane namespace appears
+//     (before etcd-druid creates the StatefulSets), so CreateVolume forwards both annotations on the initial DataVolume creation
+//     without racing against ControllerPublishVolume's 5 QPS client rate limiter.
+//  3. Annotates any additional Shoot control-plane PVCs (such as prometheus-db-prometheus-shoot-0) with the same CDI annotations.
 func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg *config.ReleaseTestConfig, shootKey client.ObjectKey) {
 	if cfg == nil || cfg.Seed == nil || cfg.Seed.HostCluster == nil {
 		return
@@ -200,6 +212,7 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 
 	shootNamespace := "shoot--" + shootKey.Namespace + "--" + shootKey.Name
 	netpolCreated := false
+	etcdPVCsPrecreated := false
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -235,19 +248,69 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 				}
 			}
 
-			// Bypass CDI VolumeBlankSource populator and request immediate binding so KubeVirt hotplug attaches etcd PVCs without stalling.
+			// Pre-create the 6 etcd StatefulSet PVCs with CDI immediate-bind annotations before etcd-druid creates
+			// the StatefulSets so CreateVolume passes both annotations on the initial DataVolume creation.
+			if !etcdPVCsPrecreated {
+				fsMode := corev1.PersistentVolumeFilesystem
+				precreateSpecs := []struct {
+					nameFormat  string
+					partOf      string
+					storageSize string
+				}{
+					{nameFormat: etcdMainPVCNameFormat, partOf: "etcd-main", storageSize: etcdMainStorageSize},
+					{nameFormat: etcdEventsPVCNameFormat, partOf: "etcd-events", storageSize: etcdEventsStorageSize},
+				}
+				allCreated := true
+				for _, spec := range precreateSpecs {
+					for ordinal := 0; ordinal < 3; ordinal++ {
+						pvcName := fmt.Sprintf(spec.nameFormat, ordinal)
+						pvc := &corev1.PersistentVolumeClaim{
+							ObjectMeta: metav1.ObjectMeta{
+								Name:      pvcName,
+								Namespace: shootNamespace,
+								Annotations: map[string]string{
+									cdiUsePopulatorAnnotationKey:        "false",
+									cdiBindImmediateRequestedAnnotation: "true",
+								},
+								Labels: map[string]string{
+									"app.kubernetes.io/managed-by": "etcd-druid",
+									"app.kubernetes.io/part-of":    spec.partOf,
+								},
+							},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+								Resources: corev1.VolumeResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceStorage: resource.MustParse(spec.storageSize),
+									},
+								},
+								StorageClassName: ptr.To(kubevirtStorageClassName),
+								VolumeMode:       &fsMode,
+							},
+						}
+						if err := seedClient.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
+							allCreated = false
+						}
+					}
+				}
+				if allCreated {
+					etcdPVCsPrecreated = true
+				}
+			}
+
+			// Bypass CDI VolumeBlankSource populator and request immediate binding for any other PVCs created in shootNamespace.
 			pvcList := &corev1.PersistentVolumeClaimList{}
 			if err := seedClient.List(ctx, pvcList, client.InNamespace(shootNamespace)); err == nil {
 				for _, item := range pvcList.Items {
-					if item.Annotations["cdi.kubevirt.io/storage.usePopulator"] != "false" ||
-						item.Annotations["cdi.kubevirt.io/storage.bind.immediate.requested"] != "true" {
+					if item.Annotations[cdiUsePopulatorAnnotationKey] != "false" ||
+						item.Annotations[cdiBindImmediateRequestedAnnotation] != "true" {
 						pvc := item
 						patch := client.MergeFrom(pvc.DeepCopy())
 						if pvc.Annotations == nil {
 							pvc.Annotations = make(map[string]string)
 						}
-						pvc.Annotations["cdi.kubevirt.io/storage.usePopulator"] = "false"
-						pvc.Annotations["cdi.kubevirt.io/storage.bind.immediate.requested"] = "true"
+						pvc.Annotations[cdiUsePopulatorAnnotationKey] = "false"
+						pvc.Annotations[cdiBindImmediateRequestedAnnotation] = "true"
 						_ = seedClient.Patch(ctx, &pvc, patch)
 					}
 				}

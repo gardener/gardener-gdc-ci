@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,12 @@ const (
 	internalLBSubnetAnnotationKey        = "networking.gke.io/load-balancer-subnet"
 	externalLBIPAddressesAnnotationKey   = "networking.gke.io/load-balancer-ip-addresses"
 	internalLBAllowProjectsAnnotationKey = "networking.gke.io/load-balancer-allow-projects"
+
+	lbLifecycleNamespacePrefix = "lb-lifecycle-test-"
+	elbTestSubnetPrefix        = "elb-test-"
+	ilbTestSubnetPrefix        = "ilb-test-"
+	leafSubnetSuffix           = "-leaf"
+	branchSubnetSuffix         = "-branch"
 )
 
 func TestLoadBalancerServiceLifecycle(t *testing.T) {
@@ -121,12 +128,16 @@ func TestLoadBalancerServiceLifecycle(t *testing.T) {
 	goClient := shootClients.Client
 	restConfig := shootClients.Config
 
+	// Clean up any stale lb-lifecycle-test-* namespaces and elb-test-*/ilb-test-* subnets
+	// left behind if a previous attempt timed out and skipped t.Cleanup().
+	cleanupStaleLoadBalancerTestResources(ctx, t, watchClient, releasePipelineCfg.GlobalAPIClient, releasePipelineCfg.GDC.Project)
+
 	suffix := uniqueSuffix()
-	namespace := fmt.Sprintf("lb-lifecycle-test-%s", suffix)
-	elbLeafSubnetName := fmt.Sprintf("elb-test-%s-leaf", suffix)
-	elbBranchSubnetName := fmt.Sprintf("elb-test-%s-branch", suffix)
-	ilbLeafSubnetName := fmt.Sprintf("ilb-test-%s-leaf", suffix)
-	ilbBranchSubnetName := fmt.Sprintf("ilb-test-%s-branch", suffix)
+	namespace := fmt.Sprintf("%s%s", lbLifecycleNamespacePrefix, suffix)
+	elbLeafSubnetName := fmt.Sprintf("%s%s%s", elbTestSubnetPrefix, suffix, leafSubnetSuffix)
+	elbBranchSubnetName := fmt.Sprintf("%s%s%s", elbTestSubnetPrefix, suffix, branchSubnetSuffix)
+	ilbLeafSubnetName := fmt.Sprintf("%s%s%s", ilbTestSubnetPrefix, suffix, leafSubnetSuffix)
+	ilbBranchSubnetName := fmt.Sprintf("%s%s%s", ilbTestSubnetPrefix, suffix, branchSubnetSuffix)
 
 	// Register Subnet cleanup first so it runs LAST (after namespace cleanup)
 	t.Cleanup(func() {
@@ -1057,4 +1068,78 @@ func setupSecondaryProjectVM(ctx context.Context, t *testing.T, releasePipelineC
 	})
 
 	return vmManager
+}
+
+// cleanupStaleLoadBalancerTestResources removes any leftover lb-lifecycle-test-* namespaces on the Shoot
+// and elb-test-*/ilb-test-* subnets in the Global API project namespace from a prior timed-out attempt,
+// polling until all stale resources and their child IP allocations are completely removed so retries
+// do not hit IPAM0012 IP shortage when the parent public subnet group has a single /31 CIDR.
+func cleanupStaleLoadBalancerTestResources(ctx context.Context, t *testing.T, shootClient client.WithWatch, globalClient client.Client, project string) {
+	// Step 1: Poll until all stale lb-lifecycle-test-* Shoot namespaces (and their LoadBalancer Services) are deleted
+	// so cloud-controller-manager releases any allocated IPs from the custom test subnets.
+	if err := wait.PollUntilContextTimeout(
+		ctx,
+		pollInterval,
+		waitForNamespaceDeletionTimeout,
+		true,
+		func(ctx context.Context) (bool, error) {
+			var nsList corev1.NamespaceList
+			if err := shootClient.List(ctx, &nsList); err != nil {
+				t.Logf("Warning: failed to list Shoot namespaces during stale cleanup (will retry): %v", err)
+				return false, nil
+			}
+			remaining := 0
+			for _, ns := range nsList.Items {
+				if strings.HasPrefix(ns.Name, lbLifecycleNamespacePrefix) {
+					remaining++
+					if ns.DeletionTimestamp.IsZero() {
+						t.Logf("Deleting stale LoadBalancer test namespace %s...", ns.Name)
+						kubernetes.CleanupResources(t, shootClient, ns.Name)
+					}
+				}
+			}
+			return remaining == 0, nil
+		},
+	); err != nil {
+		t.Logf("Warning: timed out waiting for stale %s* namespaces to be deleted: %v", lbLifecycleNamespacePrefix, err)
+	}
+
+	// Step 2: Poll until all stale elb-test-*-leaf and ilb-test-*-leaf subnets are deleted.
+	// The IPAM admission webhook rejects subnet deletion ("cannot delete subnet with children") while
+	// LoadBalancer IPAddress child objects are still being asynchronously cleaned up, so we poll and retry Delete.
+	deleteSubnetsBySuffix := func(suffix string) {
+		if err := wait.PollUntilContextTimeout(
+			ctx,
+			pollInterval,
+			waitForLBServiceTimeout,
+			true,
+			func(ctx context.Context) (bool, error) {
+				var subnetList ipamglobalv1.SubnetList
+				if err := globalClient.List(ctx, &subnetList, client.InNamespace(project)); err != nil {
+					t.Logf("Warning: failed to list Subnets in %s during stale cleanup (will retry): %v", project, err)
+					return false, nil
+				}
+				remaining := 0
+				for i := range subnetList.Items {
+					s := &subnetList.Items[i]
+					if (strings.HasPrefix(s.Name, elbTestSubnetPrefix) || strings.HasPrefix(s.Name, ilbTestSubnetPrefix)) && strings.HasSuffix(s.Name, suffix) {
+						remaining++
+						if s.DeletionTimestamp.IsZero() {
+							t.Logf("Deleting stale LoadBalancer subnet %s/%s...", project, s.Name)
+							if err := globalClient.Delete(ctx, s); client.IgnoreNotFound(err) != nil {
+								t.Logf("Waiting for child IP allocations to release before deleting subnet %s/%s: %v", project, s.Name, err)
+							}
+						}
+					}
+				}
+				return remaining == 0, nil
+			},
+		); err != nil {
+			t.Logf("Warning: timed out waiting for stale *%s subnets in %s to be deleted: %v", suffix, project, err)
+		}
+	}
+
+	// Leaf subnets must be completely deleted before their parent branch subnets can be deleted.
+	deleteSubnetsBySuffix(leafSubnetSuffix)
+	deleteSubnetsBySuffix(branchSubnetSuffix)
 }

@@ -32,8 +32,10 @@ import (
 	"k8s.io/utils/ptr"
 
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -45,6 +47,7 @@ import (
 	releaseConfig "github.com/gardener/gardener-gdc-ci/integration/pkg/config/release"
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/gardener"
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/helm"
+	"github.com/gardener/gardener-gdc-ci/integration/pkg/kubernetes"
 )
 
 var (
@@ -55,9 +58,24 @@ var (
 )
 
 const (
-	waitForSeedCreationTimeout  = 45 * time.Minute
-	gardenletValuesTemplatePath = "gardenlet-values.yaml"
-	gdchCredentialsSecretName   = "gdch-cred"
+	waitForSeedCreationTimeout          = 45 * time.Minute
+	seedPrometheusPVCBindTimeout        = 2 * time.Minute
+	seedPrometheusPVCPollInterval       = 2 * time.Second
+	gardenletValuesTemplatePath         = "gardenlet-values.yaml"
+	gdchCredentialsSecretName           = "gdch-cred"
+	gardenNamespace                     = "garden"
+	gardenerFastStorageClass            = "gardener.cloud-fast"
+	seedPrometheusStorageSize           = "10Gi"
+	prometheusPVCNameFormat             = "prometheus-db-prometheus-%s-0"
+	kvcsiAnnotationsAllowlistConfigMap  = "kvcsi-annotations-allowlist"
+	kvcsiAnnotationsAllowlistDataKey    = "allowlist"
+	kubevirtCSIControllerDeploymentName = "kubevirt-csi-controller"
+	extensionControlPlaneSeedMRName     = "extension-controlplane-seed"
+	extensionControlPlaneShootMRName    = "extension-controlplane-shoot"
+	shootCoreVPAMRName                  = "shoot-core-vpa"
+	gardenerIgnoreAnnotationKey         = "resources.gardener.cloud/ignore"
+	cdiUsePopulatorAnnotationKey        = "cdi.kubevirt.io/storage.usePopulator"
+	cdiBindImmediateRequestedAnnotation = "cdi.kubevirt.io/storage.bind.immediate.requested"
 )
 
 type seedTemplateData struct {
@@ -511,6 +529,13 @@ func deployGardenlet(ctx context.Context, releaseConfigData *config.ReleaseTestC
 	// Suppress the host Shoot's VPA before deploying gardenlet so only the Seed's VPA manages VPA resources on this cluster.
 	suppressRemoteShootTargetVPA(ctx, releaseConfigData)
 
+	// Pre-create the 3 garden Prometheus PVCs (prometheus-db-prometheus-{aggregate,cache,seed}-0) with KubeVirt CDI
+	// immediate-bind annotations before gardenlet deploys seed-prometheus. On freshly provisioned GDC Seed host Shoots,
+	// prometheus-operator creates Filesystem PVCs without CDI annotations, which default to CDI's Volume Populator
+	// (prime-*) flow under WaitForFirstConsumer and remain Pending. Pre-creating them with usePopulator="false" and
+	// bind.immediate.requested="true" causes KubeVirt CDI to bind the volumes immediately so StatefulSets adopt them.
+	ensureSeedGardenPrometheusPVCs(ctx, releaseConfigData)
+
 	// Install helm chart
 	opts := helm.InstallOptions{
 		ChartPath:      seedData.GardenletChartURL,
@@ -524,6 +549,183 @@ func deployGardenlet(ctx context.Context, releaseConfigData *config.ReleaseTestC
 		return fmt.Errorf("failed to install or upgrade gardenlet: %w", err)
 	}
 	return nil
+}
+
+// ensureSeedGardenPrometheusPVCs ensures that when a GDC Shoot cluster (e.g., sh-grv-*-a) is registered as a Seed:
+//  1. The host Seed's csi-driver-controller ConfigMap (kvcsi-annotations-allowlist) in shoot--<ns>--<name> allows
+//     forwarding both cdi.kubevirt.io/storage.usePopulator and cdi.kubevirt.io/storage.bind.immediate.requested
+//     to the underlying GDC infrastructure cluster, restarting csi-driver-controller if the allowlist was updated.
+//  2. The 3 StatefulSet PVCs used by Gardener's seed-prometheus stack in namespace "garden"
+//     (prometheus-db-prometheus-aggregate-0, prometheus-db-prometheus-cache-0, prometheus-db-prometheus-seed-0)
+//     exist with cdi.kubevirt.io/storage.usePopulator="false" and cdi.kubevirt.io/storage.bind.immediate.requested="true"
+//     and reach Phase=Bound before gardenlet is deployed.
+//     Because Kubernetes StatefulSets match existing PVCs by deterministic name (<claimTemplate>-<statefulset>-<ordinal>)
+//     and never overwrite existing PVCs, pre-creating and binding these PVCs guarantees immediate readiness on first boot
+//     of a brand-new Seed host cluster without waiting for or getting stuck on CDI prime-* populator pods.
+func ensureSeedGardenPrometheusPVCs(ctx context.Context, releaseConfigData *config.ReleaseTestConfig) {
+	if releaseConfigData == nil || releaseConfigData.Seed == nil || releaseConfigData.Seed.HostCluster == nil || releaseConfigData.Seed.HostCluster.Shoot == nil {
+		return
+	}
+	remoteShootCluster := releaseConfigData.Seed.HostCluster.Shoot
+	if remoteShootCluster.VirtualGarden == nil {
+		return
+	}
+	shootKey := client.ObjectKey{Name: remoteShootCluster.Name, Namespace: remoteShootCluster.Namespace}
+
+	// Step 1: Ensure kvcsi-annotations-allowlist on the host VUC includes cdi.kubevirt.io/storage.bind.immediate.requested
+	// so csi-driver-controller forwards the immediate-bind annotation from the Seed host Shoot to the infra cluster.
+	if releaseConfigData.GDC != nil && releaseConfigData.GDCClient != nil {
+		if userClusterClients, err := config.GetGDCUserClusterClients(releaseConfigData.GDC.UserClusters, releaseConfigData.GDCClient); err == nil {
+			shootNamespace := fmt.Sprintf("shoot--%s--%s", shootKey.Namespace, shootKey.Name)
+			for _, ucClient := range userClusterClients {
+				cm := &corev1.ConfigMap{}
+				if err := ucClient.Get(ctx, client.ObjectKey{Name: kvcsiAnnotationsAllowlistConfigMap, Namespace: shootNamespace}, cm); err == nil {
+					// Always pause extension-controlplane-seed (which owns ConfigMap/kvcsi-annotations-allowlist via
+					// resources.gardener.cloud/origin) so gardener-resource-manager never reverts the allowlist mid-run.
+					for _, mrName := range []string{extensionControlPlaneSeedMRName, extensionControlPlaneShootMRName} {
+						mr := &unstructured.Unstructured{}
+						mr.SetGroupVersionKind(schema.GroupVersionKind{
+							Group:   "resources.gardener.cloud",
+							Version: "v1alpha1",
+							Kind:    "ManagedResource",
+						})
+						if err := ucClient.Get(ctx, client.ObjectKey{Name: mrName, Namespace: shootNamespace}, mr); err == nil {
+							ann := mr.GetAnnotations()
+							if ann[gardenerIgnoreAnnotationKey] != "true" {
+								if ann == nil {
+									ann = make(map[string]string)
+								}
+								ann[gardenerIgnoreAnnotationKey] = "true"
+								mr.SetAnnotations(ann)
+								_ = ucClient.Update(ctx, mr)
+							}
+						}
+					}
+
+					allowlist := cm.Data[kvcsiAnnotationsAllowlistDataKey]
+					if !strings.Contains(allowlist, cdiBindImmediateRequestedAnnotation) {
+						log.Printf("Updating %s/%s to allow %s...", shootNamespace, kvcsiAnnotationsAllowlistConfigMap, cdiBindImmediateRequestedAnnotation)
+						if cm.Data == nil {
+							cm.Data = make(map[string]string)
+						}
+						cm.Data[kvcsiAnnotationsAllowlistDataKey] = strings.TrimSpace(allowlist) + "\n" + cdiBindImmediateRequestedAnnotation + "\n"
+						if err := ucClient.Update(ctx, cm); err == nil {
+							// Restart kubevirt-csi-controller so it reloads the mounted allowlist ConfigMap immediately.
+							deploy := &appsv1.Deployment{}
+							deployKey := client.ObjectKey{Name: kubevirtCSIControllerDeploymentName, Namespace: shootNamespace}
+							if err := ucClient.Get(ctx, deployKey, deploy); err == nil {
+								patch := client.MergeFrom(deploy.DeepCopy())
+								if deploy.Spec.Template.Annotations == nil {
+									deploy.Spec.Template.Annotations = make(map[string]string)
+								}
+								deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().UTC().Format(time.RFC3339)
+								if err := ucClient.Patch(ctx, deploy, patch); err == nil {
+									_ = kubernetes.WaitForDeploymentReady(ctx, ucClient, shootNamespace, kubevirtCSIControllerDeploymentName, seedPrometheusPVCBindTimeout)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Step 2: Connect to the Seed host Shoot cluster and pre-create (or recreate if Pending without annotations) the 3 garden Prometheus PVCs.
+	shootClients, err := gardener.NewShootClient(ctx, remoteShootCluster.VirtualGarden.Client, shootKey)
+	if err != nil || shootClients == nil || shootClients.WatchClient == nil {
+		log.Printf("Warning: unable to connect to Seed host Shoot %s for Prometheus PVC pre-creation: %v", shootKey, err)
+		return
+	}
+	targetClient := shootClients.WatchClient
+
+	gardenNS := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: gardenNamespace,
+		},
+	}
+	_ = targetClient.Create(ctx, gardenNS)
+
+	fsMode := corev1.PersistentVolumeFilesystem
+	instances := []string{"aggregate", "cache", "seed"}
+	for _, instance := range instances {
+		pvcName := fmt.Sprintf(prometheusPVCNameFormat, instance)
+		pvcKey := client.ObjectKey{Name: pvcName, Namespace: gardenNamespace}
+		existing := &corev1.PersistentVolumeClaim{}
+		err := targetClient.Get(ctx, pvcKey, existing)
+		if err == nil {
+			if existing.Status.Phase == corev1.ClaimBound {
+				continue
+			}
+			// csi-driver-gdch only copies Shoot PVC annotations to the infra PVC at CreateVolume time.
+			// If an existing PVC is still Pending and lacks the CDI immediate-bind annotations, delete and recreate it.
+			if existing.Annotations[cdiUsePopulatorAnnotationKey] != "false" ||
+				existing.Annotations[cdiBindImmediateRequestedAnnotation] != "true" {
+				log.Printf("Recreating Pending unannotated PVC %s/%s with CDI immediate-bind annotations...", gardenNamespace, pvcName)
+				_ = targetClient.Delete(ctx, existing)
+				_ = wait.PollUntilContextTimeout(ctx, seedPrometheusPVCPollInterval, seedPrometheusPVCBindTimeout, true, func(ctx context.Context) (bool, error) {
+					check := &corev1.PersistentVolumeClaim{}
+					if getErr := targetClient.Get(ctx, pvcKey, check); errors.IsNotFound(getErr) {
+						return true, nil
+					}
+					return false, nil
+				})
+				err = errors.NewNotFound(corev1.Resource("persistentvolumeclaims"), pvcName)
+			}
+		}
+		if errors.IsNotFound(err) {
+			log.Printf("Pre-creating annotated Seed Prometheus PVC %s/%s...", gardenNamespace, pvcName)
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcName,
+					Namespace: gardenNamespace,
+					Annotations: map[string]string{
+						cdiUsePopulatorAnnotationKey:        "false",
+						cdiBindImmediateRequestedAnnotation: "true",
+					},
+					Labels: map[string]string{
+						"app.kubernetes.io/instance":   instance,
+						"app.kubernetes.io/managed-by": "prometheus-operator",
+						"app.kubernetes.io/name":       "prometheus",
+						"operator.prometheus.io/name":  instance,
+						"operator.prometheus.io/shard": "0",
+						"prometheus":                   instance,
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse(seedPrometheusStorageSize),
+						},
+					},
+					StorageClassName: ptr.To(gardenerFastStorageClass),
+					VolumeMode:       &fsMode,
+				},
+			}
+			if createErr := targetClient.Create(ctx, pvc); createErr != nil && !errors.IsAlreadyExists(createErr) {
+				log.Printf("Warning: failed to pre-create PVC %s/%s: %v", gardenNamespace, pvcName, createErr)
+			}
+		}
+	}
+
+	// Step 3: Poll until all 3 garden Prometheus PVCs reach Bound before deploying gardenlet.
+	if err := wait.PollUntilContextTimeout(ctx, seedPrometheusPVCPollInterval, seedPrometheusPVCBindTimeout, true, func(ctx context.Context) (bool, error) {
+		for _, instance := range instances {
+			pvcName := fmt.Sprintf(prometheusPVCNameFormat, instance)
+			pvc := &corev1.PersistentVolumeClaim{}
+			if err := targetClient.Get(ctx, client.ObjectKey{Name: pvcName, Namespace: gardenNamespace}, pvc); err != nil {
+				return false, nil
+			}
+			if pvc.Status.Phase != corev1.ClaimBound {
+				return false, nil
+			}
+		}
+		return true, nil
+	}); err != nil {
+		log.Printf("Warning: not all Seed Prometheus PVCs in %s bound within %s: %v", gardenNamespace, seedPrometheusPVCBindTimeout, err)
+	} else {
+		log.Printf("All 3 Seed Prometheus PVCs in %s are Bound.", gardenNamespace)
+	}
 }
 
 // suppressRemoteShootTargetVPA disables the host Shoot's target VPA bindings on a Shooted Seed.
@@ -552,12 +754,12 @@ func suppressRemoteShootTargetVPA(ctx context.Context, releaseConfigData *config
 					Version: "v1alpha1",
 					Kind:    "ManagedResource",
 				})
-				if err := ucClient.Get(ctx, client.ObjectKey{Name: "shoot-core-vpa", Namespace: shootNamespace}, mr); err == nil {
+				if err := ucClient.Get(ctx, client.ObjectKey{Name: shootCoreVPAMRName, Namespace: shootNamespace}, mr); err == nil {
 					ann := mr.GetAnnotations()
 					if ann == nil {
 						ann = make(map[string]string)
 					}
-					ann["resources.gardener.cloud/ignore"] = "true"
+					ann[gardenerIgnoreAnnotationKey] = "true"
 					mr.SetAnnotations(ann)
 					_ = ucClient.Update(ctx, mr)
 				}

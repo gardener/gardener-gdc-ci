@@ -112,8 +112,8 @@ if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
   fi
 fi
 
-# Prepend the latest run and retain the most recent 100 runs
-jq --argjson entry "${NEW_ENTRY}" '[$entry] + . | unique_by(.runId) | .[:100]' "${DASHBOARD_DATA_FILE}" > "${DASHBOARD_DATA_FILE}.tmp"
+# Prepend the latest run, deduplicate by runId, sort by runNumber descending, and retain the most recent 100 runs
+jq --argjson entry "${NEW_ENTRY}" '[$entry] + . | unique_by(.runId) | sort_by(-((.runNumber | tonumber?) // 0)) | .[:100]' "${DASHBOARD_DATA_FILE}" > "${DASHBOARD_DATA_FILE}.tmp"
 mv "${DASHBOARD_DATA_FILE}.tmp" "${DASHBOARD_DATA_FILE}"
 
 # Publish updated dashboard and runs.json to gh-pages branch when running on main
