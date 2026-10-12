@@ -15,3 +15,5 @@ bin/
 # Test and vendor artifacts
 vendor
 /testlist
+__pycache__/
+*.pyc

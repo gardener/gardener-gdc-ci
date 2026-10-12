@@ -84,20 +84,16 @@ MCM_NEEDS_RELEASE="true"
 CCM_NEEDS_RELEASE="true"
 
 # Compute SemVer 2.0 artifact version tags from each repository's VERSION file:
-# - In `release` mode: check if code changed since the last published release tag (excluding VERSION).
-#   - If changed (or no prior tag): strip `-dev` (`vX.Y.Z`) and set `needsRelease=true`.
-#   - If unchanged: reuse `<last_tag>` for E2E testing and set `needsRelease=false` so Stage 8 skips
-#     pushing duplicate artifacts to `releases`, creating tags, or bumping `VERSION`.
+# - In `release` mode:
+#   1. Check if `machine-controller-manager-provider-gdc` or `cloud-provider-gdc` changed since its last tag.
+#      - If changed (or no prior tag): strip `-dev` (`vX.Y.Z`) and set `needsRelease=true`.
+#      - If unchanged: reuse `<last_tag>` and set `needsRelease=false` (no-op for that subcomponent).
+#   2. Check if `gardener-extension-provider-gdc` changed directly OR transitively because MCM or CCM needs release
+#      (which will update `imagevector/images.yaml` in Stage 8).
+#      - If true: strip `-dev` (`vX.Y.Z`) and set `EXT_NEEDS_RELEASE=true`.
+#      - If false: reuse `<EXT_LAST_TAG>` and set `EXT_NEEDS_RELEASE=false`.
 # - In `snapshot` mode: use `<VERSION>-<short_sha>` (`vX.Y.Z-dev-<sha>`).
-# - `external-dns-management` strips `-dev` in `release` mode (`vX.Y.Z`) and uses `<VERSION>-<short_sha>` in `snapshot` mode.
 if [[ "${RELEASE_MODE}" == "release" ]]; then
-  if has_code_changes_since_tag "${EXT_DIR}" "${EXT_LAST_TAG}"; then
-    EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_BASE_VERSION%-dev}}"
-  else
-    EXT_NEEDS_RELEASE="false"
-    EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_LAST_TAG}}"
-  fi
-
   if has_code_changes_since_tag "${MCM_GDC_DIR}" "${MCM_LAST_TAG}"; then
     MCM_PROVIDER_GDC_ARTIFACTS_VERSION="${MCM_PROVIDER_GDC_ARTIFACTS_VERSION:-${MCM_GDC_BASE_VERSION%-dev}}"
   else
@@ -110,6 +106,13 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
   else
     CCM_NEEDS_RELEASE="false"
     CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION:-${CCM_LAST_TAG}}"
+  fi
+
+  if has_code_changes_since_tag "${EXT_DIR}" "${EXT_LAST_TAG}" || [[ "${MCM_NEEDS_RELEASE}" == "true" || "${CCM_NEEDS_RELEASE}" == "true" ]]; then
+    EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_BASE_VERSION%-dev}}"
+  else
+    EXT_NEEDS_RELEASE="false"
+    EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_LAST_TAG}}"
   fi
 
   EXTERNAL_DNS_ARTIFACTS_VERSION="${EXTERNAL_DNS_ARTIFACTS_VERSION:-${DNS_BASE_VERSION%-dev}}"
