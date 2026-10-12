@@ -236,7 +236,7 @@
     async function loadDashboard() {
       let recordedRuns = [];
       try {
-        const res = await fetch('./data/runs.json');
+        const res = await fetch('./data/runs.json', { cache: 'no-store' });
         if (res.ok) {
           recordedRuns = await res.json();
         }
@@ -244,34 +244,9 @@
         console.warn('Could not load local runs.json:', e);
       }
 
-      let apiRuns = [];
-      try {
-        const apiRes = await fetch('https://api.github.com/repos/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml/runs?per_page=30');
-        if (apiRes.ok) {
-          const data = await apiRes.json();
-          const recordedIds = new Set(recordedRuns.map(r => String(r.runId)));
-          apiRuns = (data.workflow_runs || [])
-            .filter(w => !recordedIds.has(String(w.id)))
-            .map(w => ({
-              runId: String(w.id),
-              runNumber: String(w.run_number),
-              timestamp: w.created_at,
-              trigger: w.event,
-              releaseMode: 'snapshot',
-              actor: (w.actor && w.actor.login) || 'github-actions',
-              status: w.status === 'completed' ? (w.conclusion || 'unknown') : w.status,
-              duration: 'N/A',
-              artifactsVersion: w.head_sha ? w.head_sha.slice(0, 7) : '-',
-              runUrl: w.html_url,
-              components: {},
-              stages: {}
-            }));
-        }
-      } catch (e) {
-        console.warn('Could not fetch live workflow runs from GitHub API:', e);
-      }
-
-      allRuns = [...recordedRuns, ...apiRuns];
+      allRuns = (Array.isArray(recordedRuns) ? recordedRuns : [])
+        .slice()
+        .sort((a, b) => Number(b.runNumber || 0) - Number(a.runNumber || 0));
       document.getElementById('kpi-total').textContent = allRuns.length;
 
       const completed = allRuns.filter(r => r.status === 'success' || r.status === 'failure');
