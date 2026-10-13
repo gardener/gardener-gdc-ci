@@ -383,16 +383,20 @@ func parseHarborUrl(harborRegistryURL string, t *testing.T) *harborRegistry {
 }
 
 func labelGardenNamespace(ctx context.Context, gardenClient client.Client, t *testing.T) {
-	ns := &corev1.Namespace{}
-	if err := gardenClient.Get(ctx, client.ObjectKey{Name: "garden"}, ns); err != nil {
-		t.Fatalf("failed to get garden namespace: %v", err)
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "garden",
+		},
 	}
-	if ns.Labels == nil {
-		ns.Labels = make(map[string]string)
-	}
-	ns.Labels["project.gardener.cloud/name"] = "garden"
-	ns.Labels["gardener.cloud/role"] = "project"
-	if err := gardenClient.Update(ctx, ns); err != nil {
+	_, err := controllerutil.CreateOrUpdate(ctx, gardenClient, ns, func() error {
+		if ns.Labels == nil {
+			ns.Labels = make(map[string]string)
+		}
+		ns.Labels["project.gardener.cloud/name"] = "garden"
+		ns.Labels["gardener.cloud/role"] = "project"
+		return nil
+	})
+	if err != nil {
 		t.Fatalf("failed to update garden namespace: %v", err)
 	}
 }

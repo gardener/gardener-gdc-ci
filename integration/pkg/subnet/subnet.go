@@ -48,10 +48,7 @@ type SubnetOptions struct {
 	SkipVPCLabel      bool
 }
 
-// EnsureSubnet creates a subnet if it doesn't exist and waits for it to be ready.
-// Returns the allocated CIDR.
-func EnsureSubnet(ctx context.Context, c client.Client, opts SubnetOptions, timeout time.Duration, t *testing.T) (string, error) {
-	t.Logf("Creating Subnet %s in namespace %s", opts.Name, opts.Namespace)
+func createOrUpdateSubnet(ctx context.Context, c client.Client, opts SubnetOptions) error {
 	subnet := &ipamglobalv1.Subnet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opts.Name,
@@ -88,8 +85,27 @@ func EnsureSubnet(ctx context.Context, c client.Client, opts SubnetOptions, time
 		subnet.Spec.IPv4Request = &ipamv1.SubnetRequest{PrefixLength: ptr.To(opts.PrefixLength)}
 		return nil
 	})
+	return err
+}
 
+// EnsureSubnet creates a subnet if it doesn't exist and waits for it to be ready.
+// Returns the allocated CIDR.
+func EnsureSubnet(ctx context.Context, c client.Client, opts SubnetOptions, timeout time.Duration, t *testing.T) (string, error) {
+	t.Logf("Creating Subnet %s in namespace %s", opts.Name, opts.Namespace)
+
+	var lastCreateErr error
+	err := wait.PollUntilContextTimeout(ctx, pollInterval, timeout, true, func(ctx context.Context) (bool, error) {
+		if err := createOrUpdateSubnet(ctx, c, opts); err != nil {
+			lastCreateErr = err
+			t.Logf("Failed to create or update Subnet '%s/%s' (will retry): %v", opts.Namespace, opts.Name, err)
+			return false, nil
+		}
+		return true, nil
+	})
 	if err != nil {
+		if lastCreateErr != nil {
+			return "", fmt.Errorf("failed to create Subnet '%s/%s': %w (poll error: %v)", opts.Namespace, opts.Name, lastCreateErr, err)
+		}
 		return "", fmt.Errorf("failed to create Subnet '%s/%s': %w", opts.Namespace, opts.Name, err)
 	}
 
@@ -103,10 +119,10 @@ func EnsureSubnet(ctx context.Context, c client.Client, opts SubnetOptions, time
 		func(ctx context.Context) (bool, error) {
 			s := &ipamglobalv1.Subnet{}
 			if err := c.Get(ctx, client.ObjectKey{Name: opts.Name, Namespace: opts.Namespace}, s); err != nil {
-				if apierrors.IsNotFound(err) {
-					return false, nil
+				if !apierrors.IsNotFound(err) {
+					t.Logf("Failed to get Subnet '%s/%s' while waiting for Ready (will retry): %v", opts.Namespace, opts.Name, err)
 				}
-				return false, err
+				return false, nil
 			}
 			if meta.IsStatusConditionTrue(s.Status.Conditions, "Ready") && s.Status.IPv4Allocation != nil {
 				allocatedCIDR = s.Status.IPv4Allocation.CIDR
@@ -144,7 +160,8 @@ func DeleteSubnet(ctx context.Context, c client.Client, key client.ObjectKey, ti
 				t.Logf("Subnet %s deleted successfully", key.Name)
 				return true, nil
 			}
-			return false, err
+			t.Logf("Failed to get Subnet %s during deletion (will retry): %v", key.Name, err)
+			return false, nil
 		}
 
 		if subnet.DeletionTimestamp.IsZero() {
