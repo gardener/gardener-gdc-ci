@@ -87,6 +87,10 @@ DURATION="$(compute_pipeline_duration)"
 
 RELEASE_MODE_VAL="${RELEASE_MODE:-snapshot}"
 ARTIFACTS_VERSION="unknown"
+EXT_VERSION="N/A"
+MCM_GDC_VERSION="N/A"
+CCM_GDC_VERSION="N/A"
+DNS_VERSION="N/A"
 EXT_SHA="N/A"
 MCM_GDC_SHA="N/A"
 DNS_SHA="N/A"
@@ -94,6 +98,10 @@ CCM_GDC_SHA="N/A"
 if [[ -f "${RELEASE_METADATA_FILE}" ]]; then
   RELEASE_MODE_VAL="$(yq -r '.releaseMode // "snapshot"' "${RELEASE_METADATA_FILE}")"
   ARTIFACTS_VERSION="$(yq -r '.gardenerArtifactsVersion // "unknown"' "${RELEASE_METADATA_FILE}")"
+  EXT_VERSION="$(yq -r '.extensionGDCArtifactsVersion // .components.gardenerExtensionProviderGDC.version // .gardenerArtifactsVersion // "N/A"' "${RELEASE_METADATA_FILE}")"
+  MCM_GDC_VERSION="$(yq -r '.mcmProviderGDCArtifactsVersion // .components.machineControllerManagerProviderGDC.version // .gardenerArtifactsVersion // "N/A"' "${RELEASE_METADATA_FILE}")"
+  CCM_GDC_VERSION="$(yq -r '.cloudProviderGDCArtifactsVersion // .components.cloudProviderGDC.version // .gardenerArtifactsVersion // "N/A"' "${RELEASE_METADATA_FILE}")"
+  DNS_VERSION="$(yq -r '.externalDNSArtifactsVersion // .components.externalDNSManagement.version // "N/A"' "${RELEASE_METADATA_FILE}")"
   EXT_SHA="$(yq -r '.components.gardenerExtensionProviderGDC.commitSHA // "N/A"' "${RELEASE_METADATA_FILE}")"
   MCM_GDC_SHA="$(yq -r '.components.machineControllerManagerProviderGDC.commitSHA // "N/A"' "${RELEASE_METADATA_FILE}")"
   DNS_SHA="$(yq -r '.components.externalDNSManagement.commitSHA // "N/A"' "${RELEASE_METADATA_FILE}")"
@@ -110,6 +118,10 @@ NEW_ENTRY="$(jq -n \
   --arg status "${OVERALL_STATUS}" \
   --arg duration "${DURATION}" \
   --arg artifactsVersion "${ARTIFACTS_VERSION}" \
+  --arg extVersion "${EXT_VERSION}" \
+  --arg mcmGdcVersion "${MCM_GDC_VERSION}" \
+  --arg ccmGdcVersion "${CCM_GDC_VERSION}" \
+  --arg dnsVersion "${DNS_VERSION}" \
   --arg extSha "${EXT_SHA}" \
   --arg mcmGdcSha "${MCM_GDC_SHA}" \
   --arg dnsSha "${DNS_SHA}" \
@@ -136,6 +148,12 @@ NEW_ENTRY="$(jq -n \
     artifactsVersion: $artifactsVersion,
     runUrl: $runUrl,
     publicRegistry: $publicRegistry,
+    componentVersions: {
+      extensionProviderGDC: $extVersion,
+      mcmProviderGDC: $mcmGdcVersion,
+      cloudProviderGDC: $ccmGdcVersion,
+      externalDNS: $dnsVersion
+    },
     components: {
       extensionProviderGDC: $extSha,
       mcmProviderGDC: $mcmGdcSha,
@@ -194,7 +212,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 | **Duration** | \`${DURATION}\` |
 | **Trigger** | \`${TRIGGER_EVENT}\` (by \`@${ACTOR}\`) |
 | **Release Mode** | \`${RELEASE_MODE_VAL}\` |
-| **Artifacts Version** | \`${ARTIFACTS_VERSION}\` |
+| **Artifacts Version(Ext / MCM / CCM / DNS)** | \`${EXT_VERSION}\` / \`${MCM_GDC_VERSION}\` / \`${CCM_GDC_VERSION}\` / \`${DNS_VERSION}\` |
 | **Extension Provider GDC SHA** | \`${EXT_SHA}\` |
 | **MCM Provider GDC SHA** | \`${MCM_GDC_SHA}\` |
 | **External DNS Management SHA** | \`${DNS_SHA}\` |
