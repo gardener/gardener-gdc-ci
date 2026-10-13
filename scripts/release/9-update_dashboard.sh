@@ -203,6 +203,10 @@ fi
 
 # Write GitHub Actions Job Summary if running in GitHub Actions
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  TRIGGER_SUMMARY="\`${TRIGGER_EVENT}\` (by \`@${ACTOR}\`)"
+  if [[ "${TRIGGER_EVENT}" == "schedule" ]]; then
+    TRIGGER_SUMMARY="\`${TRIGGER_EVENT}\`"
+  fi
   cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
 ## Gardener GDC Release Pipeline Summary (Run #${RUN_NUMBER})
 
@@ -210,7 +214,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 | :--- | :--- |
 | **Overall Status** | \`${OVERALL_STATUS}\` |
 | **Duration** | \`${DURATION}\` |
-| **Trigger** | \`${TRIGGER_EVENT}\` (by \`@${ACTOR}\`) |
+| **Trigger** | ${TRIGGER_SUMMARY} |
 | **Release Mode** | \`${RELEASE_MODE_VAL}\` |
 | **Artifacts Version(Ext / MCM / CCM / DNS)** | \`${EXT_VERSION}\` / \`${MCM_GDC_VERSION}\` / \`${CCM_GDC_VERSION}\` / \`${DNS_VERSION}\` |
 | **Extension Provider GDC SHA** | \`${EXT_SHA}\` |

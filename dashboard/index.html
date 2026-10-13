@@ -224,11 +224,14 @@
         const mcmVer = compVer.mcmProviderGDC || '-';
         const ccmVer = compVer.cloudProviderGDC || '-';
         const dnsVer = compVer.externalDNS || '-';
+        const triggerLabel = (r.trigger === 'schedule' || !r.actor)
+          ? `<code>${r.trigger || '-'}</code>`
+          : `<code>${r.trigger}</code> (@${r.actor})`;
         return `<tr>
           <td><a href="${r.runUrl}" target="_blank" rel="noopener">#${r.runNumber}</a></td>
           <td>${r.timestamp}</td>
           <td><span class="badge ${mode}">${mode}</span></td>
-          <td><code>${r.trigger}</code> (@${r.actor})</td>
+          <td>${triggerLabel}</td>
           <td><span class="badge ${r.status}">${r.status}</span></td>
           <td><code>${extVer}</code> / <code>${mcmVer}</code> / <code>${ccmVer}</code> / <code>${dnsVer}</code></td>
           <td><code>${comp.extensionProviderGDC || '-'}</code> / <code>${comp.mcmProviderGDC || '-'}</code> / <code>${comp.cloudProviderGDC || '-'}</code> / <code>${comp.externalDNS || '-'}</code></td>
