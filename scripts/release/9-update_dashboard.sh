@@ -178,6 +178,9 @@ if [[ "${GITHUB_REF:-}" == "refs/heads/main" && -z "${PR_NUMBER:-}" && -n "${GH_
     if ! git -C "${PAGES_WORK_DIR}" diff --cached --quiet; then
       git -C "${PAGES_WORK_DIR}" commit -m "chore(dashboard): record ${RELEASE_MODE_VAL} run #${RUN_NUMBER}" >/dev/null 2>&1
       git -C "${PAGES_WORK_DIR}" push origin gh-pages >/dev/null 2>&1 || true
+      if command -v gh >/dev/null 2>&1; then
+        GH_TOKEN="${GH_TOKEN}" gh api -X POST "repos/${GITHUB_REPOSITORY:-gardener/gardener-gdc-ci}/pages/builds" >/dev/null 2>&1 || true
+      fi
     fi
   fi
   rm -rf "${PAGES_WORK_DIR}"

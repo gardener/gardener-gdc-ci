@@ -26,9 +26,9 @@ MCM_PROVIDER_GDC_ARTIFACTS_VERSION="$(yq -r '.mcmProviderGDCArtifactsVersion // 
 EXTERNAL_DNS_ARTIFACTS_VERSION="$(yq -r '.externalDNSArtifactsVersion' "${RELEASE_METADATA_FILE}")"
 CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="$(yq -r '.cloudProviderGDCArtifactsVersion // .gardenerArtifactsVersion' "${RELEASE_METADATA_FILE}")"
 
-EXT_NEEDS_RELEASE="$(yq -r '.components.gardenerExtensionProviderGDC.needsRelease // true' "${RELEASE_METADATA_FILE}")"
-MCM_NEEDS_RELEASE="$(yq -r '.components.machineControllerManagerProviderGDC.needsRelease // true' "${RELEASE_METADATA_FILE}")"
-CCM_NEEDS_RELEASE="$(yq -r '.components.cloudProviderGDC.needsRelease // true' "${RELEASE_METADATA_FILE}")"
+EXT_NEEDS_RELEASE="$(yq -r '.components.gardenerExtensionProviderGDC.needsRelease != false' "${RELEASE_METADATA_FILE}")"
+MCM_NEEDS_RELEASE="$(yq -r '.components.machineControllerManagerProviderGDC.needsRelease != false' "${RELEASE_METADATA_FILE}")"
+CCM_NEEDS_RELEASE="$(yq -r '.components.cloudProviderGDC.needsRelease != false' "${RELEASE_METADATA_FILE}")"
 
 EXT_LAST_TAG="$(yq -r '.components.gardenerExtensionProviderGDC.lastReleaseTag // ""' "${RELEASE_METADATA_FILE}")"
 MCM_LAST_TAG="$(yq -r '.components.machineControllerManagerProviderGDC.lastReleaseTag // ""' "${RELEASE_METADATA_FILE}")"
@@ -151,6 +151,33 @@ compute_next_dev_version() {
   esac
 }
 
+generate_subcomponent_notes_for_range() {
+  local repo_url="$1"
+  local from_tag="$2"
+  local to_ver="$3"
+  local subcomponent_notes_out="$4"
+
+  local repo_slug="${repo_url#https://github.com/}"
+  repo_slug="${repo_slug%.git}"
+  local push_token="${GDC_RELEASE_GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  if git clone --tags "${repo_url}" "${tmp_dir}" >/dev/null 2>&1; then
+    if git -C "${tmp_dir}" rev-parse -q --verify "refs/tags/${to_ver}" >/dev/null 2>&1; then
+      git -C "${tmp_dir}" checkout "refs/tags/${to_ver}" >/dev/null 2>&1 || true
+    fi
+    GDC_RELEASE_GITHUB_TOKEN="${push_token}" python3 "${SCRIPT_DIR}/helpers/generate_release_notes.py" \
+      --repo-dir "${tmp_dir}" \
+      --repo-slug "${repo_slug}" \
+      --version "${to_ver}" \
+      --from-tag "${from_tag}" \
+      --output "${tmp_dir}/full-notes.md" \
+      --subcomponent-output "${subcomponent_notes_out}" || true
+  fi
+  rm -rf "${tmp_dir}"
+}
+
 tag_and_bump_gdc_repository() {
   local repo_url="$1"
   local ref="$2"
@@ -203,6 +230,27 @@ tag_and_bump_gdc_repository() {
       "--image-update" "machine-controller-manager-provider-gdch:${prev_mcm_tag}:${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
       "--image-update" "cloud-controller-manager:${prev_ccm_tag}:${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
     )
+
+    # If a subcomponent was already tagged in a previous partial attempt (so MCM_NEEDS_RELEASE or
+    # CCM_NEEDS_RELEASE was false on retry, but imagevector/images.yaml is still advancing from
+    # prev_tag to the new version), generate its subcomponent notes on demand for idempotency.
+    if [[ -n "${MCM_SUBCOMPONENT_NOTES:-}" && ! -f "${MCM_SUBCOMPONENT_NOTES}" && -n "${prev_mcm_tag}" && "${prev_mcm_tag}" != "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" ]]; then
+      generate_subcomponent_notes_for_range "${MCM_REPO}" "${prev_mcm_tag}" "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" "${MCM_SUBCOMPONENT_NOTES}"
+      if [[ -f "${MCM_SUBCOMPONENT_NOTES}" ]]; then
+        extra_notes_args+=("--subcomponent-notes" "${MCM_SUBCOMPONENT_NOTES}")
+      fi
+    fi
+    if [[ -n "${CCM_SUBCOMPONENT_NOTES:-}" && ! -f "${CCM_SUBCOMPONENT_NOTES}" && -n "${prev_ccm_tag}" && "${prev_ccm_tag}" != "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}" ]]; then
+      generate_subcomponent_notes_for_range "${CCM_REPO}" "${prev_ccm_tag}" "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}" "${CCM_SUBCOMPONENT_NOTES}"
+      if [[ -f "${CCM_SUBCOMPONENT_NOTES}" ]]; then
+        extra_notes_args+=("--subcomponent-notes" "${CCM_SUBCOMPONENT_NOTES}")
+      fi
+    fi
+  fi
+
+  local effective_from_tag="${last_tag}"
+  if [[ "${effective_from_tag}" == "${release_ver}" ]]; then
+    effective_from_tag="$(git -C "${work_dir}" tag --list 'v*' --sort=-v:refname | grep -vxF "${release_ver}" | head -n 1 || true)"
   fi
 
   # Generate SAP Gardener-formatted release notes before creating the release commit
@@ -215,7 +263,7 @@ tag_and_bump_gdc_repository() {
     --repo-dir "${work_dir}" \
     --repo-slug "${repo_slug}" \
     --version "${release_ver}" \
-    --from-tag "${last_tag}" \
+    --from-tag "${effective_from_tag}" \
     --output "${notes_file}" \
     "${sub_args[@]}" \
     "${extra_notes_args[@]}"
@@ -226,17 +274,30 @@ tag_and_bump_gdc_repository() {
     cp "${notes_file}" "${persist_notes_out}"
   fi
 
-  # 1. Commit `release vX.Y.Z` (stripping `-dev` in VERSION + updated imagevector/images.yaml if present), tag `vX.Y.Z`, and push
-  echo "${release_ver}" > "${work_dir}/VERSION"
-  git -C "${work_dir}" add VERSION
-  if [[ -f "${work_dir}/imagevector/images.yaml" ]]; then
-    git -C "${work_dir}" add imagevector/images.yaml
+  # 1. Commit `release vX.Y.Z` (stripping `-dev` in VERSION + updated imagevector/images.yaml if present), tag `vX.Y.Z`, and push.
+  # Idempotent on retry: if `refs/tags/${release_ver}` already exists on origin with identical code/imagevector state,
+  # skip creating a duplicate release commit on top of the post-release `-dev` branch commit.
+  local tag_already_matches="false"
+  if git -C "${work_dir}" rev-parse -q --verify "refs/tags/${release_ver}" >/dev/null 2>&1; then
+    if git -C "${work_dir}" diff --quiet "refs/tags/${release_ver}" -- . ':!VERSION'; then
+      tag_already_matches="true"
+    fi
   fi
-  if ! git -C "${work_dir}" diff --cached --quiet; then
-    git -C "${work_dir}" commit -s -m "release ${release_ver}"
+
+  if [[ "${tag_already_matches}" == "true" ]]; then
+    echo "Tag ${release_ver} already exists on ${repo_slug} with matching content; skipping duplicate tag push."
+  else
+    echo "${release_ver}" > "${work_dir}/VERSION"
+    git -C "${work_dir}" add VERSION
+    if [[ -f "${work_dir}/imagevector/images.yaml" ]]; then
+      git -C "${work_dir}" add imagevector/images.yaml
+    fi
+    if ! git -C "${work_dir}" diff --cached --quiet; then
+      git -C "${work_dir}" commit -s -m "release ${release_ver}"
+    fi
+    git -C "${work_dir}" tag -f "${release_ver}"
+    git -C "${work_dir}" push origin "HEAD:refs/heads/${target_branch}" "+refs/tags/${release_ver}"
   fi
-  git -C "${work_dir}" tag -f "${release_ver}"
-  git -C "${work_dir}" push origin "HEAD:refs/heads/${target_branch}" "refs/tags/${release_ver}"
 
   # Create or update GitHub Release with Gardener-structured release notes
   if ! GH_TOKEN="${push_token}" gh release view "${release_ver}" --repo "${repo_slug}" >/dev/null 2>&1; then

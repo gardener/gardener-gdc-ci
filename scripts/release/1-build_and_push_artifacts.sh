@@ -109,7 +109,17 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
     CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION:-${CCM_LAST_TAG}}"
   fi
 
-  if has_code_changes_since_tag "${EXT_DIR}" "${EXT_LAST_TAG}" || [[ "${MCM_NEEDS_RELEASE}" == "true" || "${CCM_NEEDS_RELEASE}" == "true" ]]; then
+  EXT_IMAGEVECTOR_OUT_OF_SYNC="false"
+  if [[ -f "${EXT_DIR}/imagevector/images.yaml" ]]; then
+    EXT_IMAGEVECTOR_MCM_TAG="$(yq -r '.images[] | select(.name == "machine-controller-manager-provider-gdch") | .tag // ""' "${EXT_DIR}/imagevector/images.yaml" 2>/dev/null || echo "")"
+    EXT_IMAGEVECTOR_CCM_TAG="$(yq -r '.images[] | select(.name == "cloud-controller-manager") | .tag // ""' "${EXT_DIR}/imagevector/images.yaml" 2>/dev/null || echo "")"
+    if [[ ( -n "${EXT_IMAGEVECTOR_MCM_TAG}" && "${EXT_IMAGEVECTOR_MCM_TAG}" != "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" ) || \
+          ( -n "${EXT_IMAGEVECTOR_CCM_TAG}" && "${EXT_IMAGEVECTOR_CCM_TAG}" != "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}" ) ]]; then
+      EXT_IMAGEVECTOR_OUT_OF_SYNC="true"
+    fi
+  fi
+
+  if has_code_changes_since_tag "${EXT_DIR}" "${EXT_LAST_TAG}" || [[ "${MCM_NEEDS_RELEASE}" == "true" || "${CCM_NEEDS_RELEASE}" == "true" || "${EXT_IMAGEVECTOR_OUT_OF_SYNC}" == "true" ]]; then
     EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_BASE_VERSION%-dev}}"
   else
     EXT_NEEDS_RELEASE="false"
