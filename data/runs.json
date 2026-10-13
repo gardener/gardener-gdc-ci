@@ -7,7 +7,7 @@
     "releaseMode": "release",
     "actor": "dilipkumar2k6",
     "status": "failure",
-    "duration": "N/A",
+    "duration": "1h 52m 4s",
     "artifactsVersion": "v0.5.6",
     "runUrl": "https://github.com/gardener/gardener-gdc-ci/actions/runs/38463911606",
     "publicRegistry": "europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci",
@@ -26,6 +26,12 @@
       "teardown": "success",
       "publish": "failure",
       "ocm": "skipped"
+    },
+    "componentVersions": {
+      "extensionProviderGDC": "v0.5.6",
+      "mcmProviderGDC": "v0.5.6",
+      "cloudProviderGDC": "v0.5.5",
+      "externalDNS": "v0.54.0"
     }
   },
   {
@@ -55,6 +61,12 @@
       "teardown": "success",
       "publish": "skipped",
       "ocm": "skipped"
+    },
+    "componentVersions": {
+      "extensionProviderGDC": "v0.5.6",
+      "mcmProviderGDC": "v0.5.6",
+      "cloudProviderGDC": "v0.5.5",
+      "externalDNS": "v0.54.0"
     }
   },
   {
@@ -83,6 +95,12 @@
       "testShoot": "success",
       "teardown": "success",
       "publish": "success"
+    },
+    "componentVersions": {
+      "extensionProviderGDC": "v0.5.5-dev-25a4cea",
+      "mcmProviderGDC": "v0.5.5-dev-2cc8331",
+      "cloudProviderGDC": "v0.5.5-dev-ba98017",
+      "externalDNS": "v0.54.0-dev-3da8128"
     }
   },
   {
@@ -111,6 +129,12 @@
       "testShoot": "success",
       "teardown": "success",
       "publish": "success"
+    },
+    "componentVersions": {
+      "extensionProviderGDC": "v0.5.4-dev-1fd7ff4",
+      "mcmProviderGDC": "v0.5.4-dev-29613b9",
+      "cloudProviderGDC": "v0.5.4-dev-a62b4e6",
+      "externalDNS": "v0.53.0-dev-525e923"
     }
   }
 ]

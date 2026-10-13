@@ -185,7 +185,7 @@
             <th>Mode</th>
             <th>Trigger</th>
             <th>Status</th>
-            <th>Artifacts Version</th>
+            <th>Artifacts Version(Ext / MCM / CCM / DNS)</th>
             <th>Component Commits (Ext / MCM / CCM / DNS)</th>
             <th>Stages (B / G / S / Sh / T / Td / Pub)</th>
             <th>Duration</th>
@@ -219,13 +219,18 @@
           .map(k => `<span class="badge ${st[k] || 'unknown'}" title="${k}: ${st[k] || 'unknown'}">${(st[k] || '-')[0]}</span>`)
           .join(' ');
         const comp = r.components || {};
+        const compVer = r.componentVersions || {};
+        const extVer = compVer.extensionProviderGDC || r.artifactsVersion || '-';
+        const mcmVer = compVer.mcmProviderGDC || '-';
+        const ccmVer = compVer.cloudProviderGDC || '-';
+        const dnsVer = compVer.externalDNS || '-';
         return `<tr>
           <td><a href="${r.runUrl}" target="_blank" rel="noopener">#${r.runNumber}</a></td>
           <td>${r.timestamp}</td>
           <td><span class="badge ${mode}">${mode}</span></td>
           <td><code>${r.trigger}</code> (@${r.actor})</td>
           <td><span class="badge ${r.status}">${r.status}</span></td>
-          <td><code>${r.artifactsVersion || '-'}</code></td>
+          <td><code>${extVer}</code> / <code>${mcmVer}</code> / <code>${ccmVer}</code> / <code>${dnsVer}</code></td>
           <td><code>${comp.extensionProviderGDC || '-'}</code> / <code>${comp.mcmProviderGDC || '-'}</code> / <code>${comp.cloudProviderGDC || '-'}</code> / <code>${comp.externalDNS || '-'}</code></td>
           <td>${stageBadges}</td>
           <td>${r.duration || 'N/A'}</td>
