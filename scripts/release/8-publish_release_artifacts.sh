@@ -270,7 +270,7 @@ tag_and_bump_gdc_repository() {
 
 # Run gosec SAST on the extension source tree (already cloned at the certified commit)
 # and persist the SARIF report so it can be attached to the OCM component descriptor.
-# Report-only: findings and scan setup failures never fail the release.
+# Blocking: unsuppressed SAST findings or scan failures abort the release.
 # Use a pinned gosec version supporting Go 1.26 with Gardener's canonical sast.sh.
 run_gosec_sast_scan() {
   local src_dir="$1"
@@ -280,36 +280,47 @@ run_gosec_sast_scan() {
 
   # Resolve dependencies before locating the module's scan script or running gosec.
   if ! ( cd "${src_dir}" && go mod download ); then
-    echo "::warning::Could not resolve scan dependencies; skipping gosec SAST scan." >&2
-    return 0
+    echo "::error::Could not resolve scan dependencies for gosec SAST scan." >&2
+    return 1
   fi
   local gardener_hack_dir
   if ! gardener_hack_dir="$(cd "${src_dir}" && go list -m -f '{{.Dir}}' github.com/gardener/gardener)"; then
-    echo "::warning::Could not locate Gardener module; skipping gosec SAST scan." >&2
-    return 0
+    echo "::error::Could not locate Gardener module for gosec SAST scan." >&2
+    return 1
   fi
   gardener_hack_dir="${gardener_hack_dir}/hack"
   if [[ ! -f "${gardener_hack_dir}/sast.sh" ]]; then
-    echo "::warning::Gardener sast.sh not found at ${gardener_hack_dir}; skipping gosec SAST scan." >&2
-    return 0
+    echo "::error::Gardener sast.sh not found at ${gardener_hack_dir}." >&2
+    return 1
   fi
 
   echo "Installing gosec (${gosec_version}) for SAST scan of gardener-extension-provider-gdc..."
   if ! GOBIN="${gosec_bin_dir}" go install "github.com/securego/gosec/v2/cmd/gosec@${gosec_version}"; then
-    echo "::warning::Could not install gosec; skipping SAST scan." >&2
-    return 0
+    echo "::error::Could not install gosec (${gosec_version}) for SAST scan." >&2
+    return 1
   fi
 
-  echo "Running gosec SAST scan on gardener-extension-provider-gdc source (report-only)..."
-  # sast.sh invokes `gosec` from PATH; never abort the release on findings.
-  ( cd "${src_dir}" && PATH="${gosec_bin_dir}:${PATH}" bash "${gardener_hack_dir}/sast.sh" \
-      --gosec-report true --report-dir "$(dirname "${report_out}")" --report-fname "$(basename "${report_out}")" ) || true
-
-  if [[ -s "${report_out}" ]]; then
-    echo "gosec SAST report written to ${report_out}."
-  else
-    echo "::warning::gosec did not produce a SARIF report; SAST resource will be omitted." >&2
+  echo "Running gosec SAST scan on gardener-extension-provider-gdc source..."
+  # sast.sh invokes `gosec` from PATH and exits non-zero when unsuppressed findings are detected.
+  if ! ( cd "${src_dir}" && PATH="${gosec_bin_dir}:${PATH}" bash "${gardener_hack_dir}/sast.sh" \
+      --gosec-report true --report-dir "$(dirname "${report_out}")" --report-fname "$(basename "${report_out}")" ); then
+    echo "::error::gosec SAST scan failed or reported unsuppressed security findings in gardener-extension-provider-gdc." >&2
+    return 1
   fi
+
+  if [[ ! -s "${report_out}" ]]; then
+    echo "::error::gosec did not produce a SARIF report at ${report_out}." >&2
+    return 1
+  fi
+
+  local unsuppressed_count
+  unsuppressed_count="$(jq '[.runs[0].results[]? | select((.suppressions // []) | length == 0)] | length' "${report_out}")"
+  if [[ "${unsuppressed_count}" -gt 0 ]]; then
+    echo "::error::gosec SAST scan reported ${unsuppressed_count} unsuppressed finding(s) in ${report_out}." >&2
+    return 1
+  fi
+
+  echo "gosec SAST scan passed with 0 unsuppressed findings. Report written to ${report_out}."
 }
 
 build_and_publish_extension_release_images() {

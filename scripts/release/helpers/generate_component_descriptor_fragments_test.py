@@ -16,7 +16,7 @@ SCRIPT = Path(__file__).with_name("generate_component_descriptor_fragments.py")
 
 
 class GenerateComponentDescriptorFragmentsTest(unittest.TestCase):
-    def test_scan_setup_failures_do_not_abort_release(self):
+    def test_scan_failures_and_findings_abort_release(self):
         publish_script = SCRIPT.parent.parent / "8-publish_release_artifacts.sh"
         scan_function = publish_script.read_text().split("run_gosec_sast_scan() {", 1)[1].split(
             "\nbuild_and_publish_extension_release_images()", 1
@@ -24,28 +24,74 @@ class GenerateComponentDescriptorFragmentsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "hack").mkdir()
-            (root / "hack" / "sast.sh").write_text("exit 0\n")
-            for failure in ("download", "list", "install"):
+            for failure in ("download", "list", "install", "sast_exit", "unsuppressed_sarif"):
                 with self.subTest(failure=failure):
+                    report_file = root / "report.sarif"
+                    report_file.unlink(missing_ok=True)
+                    if failure == "sast_exit":
+                        (root / "hack" / "sast.sh").write_text("exit 1\n")
+                    elif failure == "unsuppressed_sarif":
+                        (root / "hack" / "sast.sh").write_text(
+                            'cat << \'EOF\' > "$4/$6"\n'
+                            '{"runs":[{"results":[{"ruleId":"G304","message":{"text":"unsuppressed"}}]}]}\n'
+                            'EOF\n'
+                        )
+                    else:
+                        (root / "hack" / "sast.sh").write_text("exit 0\n")
+
                     result = subprocess.run([
                         "bash", "-c", """
 set -euo pipefail
 go() {
   case "$1 $2" in
     'mod download') [[ "$FAILURE" != download ]] ;;
-    'list -m') [[ "$FAILURE" != list ]] && printf '%s\n' "$SCAN_DIR" ;;
+    'list -m') [[ "$FAILURE" != list ]] && printf '%s\\n' "$SCAN_DIR" ;;
     'install github.com/securego/gosec/v2/cmd/gosec@v2.29.0') [[ "$FAILURE" != install ]] ;;
     *) return 99 ;;
   esac
 }
 run_gosec_sast_scan() {""" + scan_function + """
 run_gosec_sast_scan "$SCAN_DIR" "$SCAN_DIR/report.sarif"
-printf 'release-continues\n'
+printf 'release-continues\\n'
 """,
                     ], env={**os.environ, "FAILURE": failure, "SCAN_DIR": str(root),
-                            "RELEASE_WORK_DIR": str(root)}, capture_output=True, text=True, check=True)
-                    self.assertIn("release-continues", result.stdout)
-                    self.assertIn("::warning::", result.stderr)
+                            "RELEASE_WORK_DIR": str(root)}, capture_output=True, text=True, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("release-continues", result.stdout)
+                    self.assertIn("::error::", result.stderr)
+
+    def test_scan_passes_when_only_suppressed_findings_exist(self):
+        publish_script = SCRIPT.parent.parent / "8-publish_release_artifacts.sh"
+        scan_function = publish_script.read_text().split("run_gosec_sast_scan() {", 1)[1].split(
+            "\nbuild_and_publish_extension_release_images()", 1
+        )[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hack").mkdir()
+            (root / "hack" / "sast.sh").write_text(
+                'cat << \'EOF\' > "$4/$6"\n'
+                '{"runs":[{"results":[{"ruleId":"G115","suppressions":[{"kind":"inSource"}]}]}]}\n'
+                'EOF\n'
+            )
+            result = subprocess.run([
+                "bash", "-c", """
+set -euo pipefail
+go() {
+  case "$1 $2" in
+    'mod download') return 0 ;;
+    'list -m') printf '%s\\n' "$SCAN_DIR" ;;
+    'install github.com/securego/gosec/v2/cmd/gosec@v2.29.0') return 0 ;;
+    *) return 99 ;;
+  esac
+}
+run_gosec_sast_scan() {""" + scan_function + """
+run_gosec_sast_scan "$SCAN_DIR" "$SCAN_DIR/report.sarif"
+printf 'release-continues\\n'
+""",
+            ], env={**os.environ, "SCAN_DIR": str(root),
+                    "RELEASE_WORK_DIR": str(root)}, capture_output=True, text=True, check=True)
+            self.assertIn("release-continues", result.stdout)
+            self.assertIn("gosec SAST scan passed with 0 unsuppressed findings.", result.stdout)
 
     def test_generates_local_and_external_image_and_chart_fragments(self):
         with tempfile.TemporaryDirectory() as directory:
