@@ -36,7 +36,54 @@ STAGE_TEARDOWN="${STAGE_TEARDOWN_STATUS:-unknown}"
 STAGE_PUBLISH="${STAGE_PUBLISH_STATUS:-skipped}"
 STAGE_OCM="${STAGE_OCM_STATUS:-skipped}"
 OVERALL_STATUS="${OVERALL_PIPELINE_STATUS:-failure}"
-DURATION="${PIPELINE_DURATION:-N/A}"
+
+format_duration_seconds() {
+  local total_secs="$1"
+  if [[ -z "${total_secs}" || "${total_secs}" -lt 0 ]]; then
+    echo "N/A"
+    return
+  fi
+  local hours=$((total_secs / 3600))
+  local mins=$(((total_secs % 3600) / 60))
+  local secs=$((total_secs % 60))
+  if [[ "${hours}" -gt 0 ]]; then
+    echo "${hours}h ${mins}m ${secs}s"
+  elif [[ "${mins}" -gt 0 ]]; then
+    echo "${mins}m ${secs}s"
+  else
+    echo "${secs}s"
+  fi
+}
+
+compute_pipeline_duration() {
+  if [[ -n "${PIPELINE_DURATION:-}" && "${PIPELINE_DURATION}" != "N/A" ]]; then
+    echo "${PIPELINE_DURATION}"
+    return
+  fi
+
+  local start_epoch="${PIPELINE_START_EPOCH:-}"
+  if [[ -z "${start_epoch}" && -f "${RELEASE_METADATA_FILE}" ]]; then
+    start_epoch="$(yq -r '.startedAtEpoch // ""' "${RELEASE_METADATA_FILE}" 2>/dev/null || true)"
+  fi
+
+  if [[ -z "${start_epoch}" && "${RUN_ID}" =~ ^[0-9]+$ ]] && command -v gh >/dev/null 2>&1; then
+    local run_started_at
+    run_started_at="$(gh api "repos/${GITHUB_REPOSITORY:-gardener/gardener-gdc-ci}/actions/runs/${RUN_ID}" --jq '.run_started_at // empty' 2>/dev/null || true)"
+    if [[ -n "${run_started_at}" ]]; then
+      start_epoch="$(date -u -d "${run_started_at}" +%s 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ "${start_epoch}" =~ ^[0-9]+$ ]]; then
+    local now_epoch
+    now_epoch="$(date -u +%s)"
+    format_duration_seconds "$((now_epoch - start_epoch))"
+  else
+    echo "N/A"
+  fi
+}
+
+DURATION="$(compute_pipeline_duration)"
 
 RELEASE_MODE_VAL="${RELEASE_MODE:-snapshot}"
 ARTIFACTS_VERSION="unknown"
@@ -144,6 +191,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 | Field | Value |
 | :--- | :--- |
 | **Overall Status** | \`${OVERALL_STATUS}\` |
+| **Duration** | \`${DURATION}\` |
 | **Trigger** | \`${TRIGGER_EVENT}\` (by \`@${ACTOR}\`) |
 | **Release Mode** | \`${RELEASE_MODE_VAL}\` |
 | **Artifacts Version** | \`${ARTIFACTS_VERSION}\` |

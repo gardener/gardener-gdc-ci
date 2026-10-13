@@ -134,6 +134,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Record Pipeline Start Time
+        run: echo "PIPELINE_START_EPOCH=$(date -u +%s)" >> "${GITHUB_ENV}"
+
       - name: Checkout target Pull Request if requested
         if: env.PR_NUMBER != ''
         run: |

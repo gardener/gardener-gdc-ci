@@ -13,6 +13,7 @@ source "${REPO_ROOT}/scripts/ci-common.sh"
 
 echo "=== Stage 1: Build and Push Candidate Artifacts (GitHub -> GHCR) ==="
 
+PIPELINE_START_EPOCH="${PIPELINE_START_EPOCH:-$(date -u +%s)}"
 BUILD_WORK_DIR="${RELEASE_WORK_DIR}/src"
 mkdir -p "${BUILD_WORK_DIR}"
 
@@ -296,6 +297,7 @@ rm -rf "${GARDENLINUX_TEMP_DIR}"
 cat > "${RELEASE_METADATA_FILE}" <<EOF
 releaseMode: "${RELEASE_MODE}"
 nextVersion: "${NEXT_VERSION}"
+startedAtEpoch: ${PIPELINE_START_EPOCH}
 gardenerArtifactsVersion: "${GARDENER_ARTIFACTS_VERSION}"
 extensionGDCArtifactsVersion: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
 mcmProviderGDCArtifactsVersion: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
