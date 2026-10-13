@@ -217,7 +217,194 @@ jobs:
           PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry }}/gardener/gardener-gdc-ci
         run: ./scripts/release/8-publish_release_artifacts.sh
 
-      - name: Stage 9 - Update Release Pipeline Dashboard & Summary
+      - name: Stage 9 - Prepare OCM Component Descriptor Fragments
+        id: ocm_inputs
+        if: success() && steps.stage_publish.outcome == 'success' && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
+        env:
+          RELEASE_METADATA_FILE: /tmp/gardener-gdc-release/release-metadata.yaml
+          CERTIFIED_RELEASE_MANIFEST: /tmp/gardener-gdc-release/artifacts/certified-release-manifest.json
+          OCM_RESOURCES_FILE: /tmp/gardener-gdc-release/ocm-resources.json
+          OCM_SOURCES_FILE: /tmp/gardener-gdc-release/ocm-sources.json
+          RELEASE_NOTES_FILE: /tmp/gardener-gdc-release/gdc-release-notes.md
+          GOSEC_REPORT_FILE: /tmp/gardener-gdc-release/artifacts/gosec-report.sarif
+        run: |
+          # No-change official runs reuse the existing component version and descriptor.
+          if [[ "${RELEASE_MODE}" == "release" && "$(yq '.components.gardenerExtensionProviderGDC.needsRelease' "${RELEASE_METADATA_FILE}")" == "false" ]]; then
+            echo "publish=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "publish=true" >> "${GITHUB_OUTPUT}"
+          python3 ./scripts/release/helpers/generate_component_descriptor_fragments.py \
+            --manifest "${CERTIFIED_RELEASE_MANIFEST}" \
+            --resources "${OCM_RESOURCES_FILE}" \
+            --sources "${OCM_SOURCES_FILE}"
+          echo "source_repository=$(jq -r '.sources[] | select(.name == \"gardener-extension-provider-gdc\") | .repository' "${CERTIFIED_RELEASE_MANIFEST}" | sed -e 's#^https://##' -e 's#\.git$##')" >> "${GITHUB_OUTPUT}"
+          echo "source_version=$(jq -r '.sources[] | select(.name == \"gardener-extension-provider-gdc\") | .version' "${CERTIFIED_RELEASE_MANIFEST}")" >> "${GITHUB_OUTPUT}"
+          echo "version=$(jq -r '.releaseVersion' "${CERTIFIED_RELEASE_MANIFEST}")" >> "${GITHUB_OUTPUT}"
+          # The aggregated GDC release notes are only produced when the extension provider
+          # is actually released (release mode + code changes). When present, embed them in
+          # the component descriptor and attach the descriptor to that GitHub Release.
+          if [[ -f "${RELEASE_NOTES_FILE}" ]]; then
+            echo "attach=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "attach=false" >> "${GITHUB_OUTPUT}"
+          fi
+          # The gosec SAST report is produced in release mode when the extension is built
+          # from source. When present, attach it as the component descriptor's SAST resource.
+          if [[ -s "${GOSEC_REPORT_FILE}" ]]; then
+            echo "sast=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "sast=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Create OCM Base Component Descriptor
+        id: ocm_base
+        if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.publish == 'true'
+        uses: gardener/cc-utils/.github/actions/base-component-descriptor@v1
+        with:
+          version: ${{ steps.ocm_inputs.outputs.version }}
+          ocm-repository: ${{ steps.gardener_params.outputs.ocm-repository }}
+
+      - name: Export Certified Artifacts as OCM Fragments
+        id: ocm_resources
+        if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.publish == 'true'
+        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@v1
+        with:
+          ocm-resources-file: /tmp/gardener-gdc-release/ocm-resources.json
+          ctx: gdc-certified
+
+      - name: Attach Release Notes as OCM Fragment
+        id: ocm_notes_blob
+        if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.attach == 'true'
+        run: |
+          mkdir -p /tmp/gardener-gdc-release/blobs.d
+          tar czf /tmp/gardener-gdc-release/blobs.d/release-notes.tar.gz \
+            -C /tmp/gardener-gdc-release gdc-release-notes.md
+
+      - name: Export Release Notes OCM Fragment
+        id: ocm_notes
+        if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.attach == 'true'
+        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@v1
+        with:
+          ctx: gdc-certified
+          blobs-directory: /tmp/gardener-gdc-release/blobs.d
+          ocm-resources: |
+            - name: release-notes
+              relation: local
+              access:
+                type: localBlob
+                localReference: release-notes.tar.gz
+              labels:
+                - name: gardener.cloud/purposes
+                  value:
+                    - release-notes
+
+      - name: Attach gosec SAST Report as OCM Fragment
+        id: ocm_sast_blob
+        if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.sast == 'true'
+        run: |
+          mkdir -p /tmp/gardener-gdc-release/blobs.d
+          tar czf /tmp/gardener-gdc-release/blobs.d/gosec-report.tar.gz \
+            -C /tmp/gardener-gdc-release/artifacts gosec-report.sarif
+
+      - name: Export gosec SAST Report OCM Fragment
+        id: ocm_sast
+        if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.sast == 'true'
+        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@v1
+        with:
+          ctx: gdc-certified
+          blobs-directory: /tmp/gardener-gdc-release/blobs.d
+          ocm-resources: |
+            - name: gosec-report
+              relation: local
+              access:
+                type: localBlob
+                localReference: gosec-report.tar.gz
+              labels:
+                - name: gardener.cloud/purposes
+                  value:
+                    - lint
+                    - sast
+                    - gosec
+                - name: gardener.cloud/comment
+                  value: |
+                    we use gosec (linter) for SAST scans
+                    see: https://github.com/securego/gosec
+
+      - name: Merge OCM Component Descriptor
+        id: ocm_merge
+        if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.publish == 'true'
+        uses: gardener/cc-utils/.github/actions/merge-ocm-fragments@v1
+        with:
+          component-descriptor-artefact: base-component-descriptor
+          ctx: gdc-certified
+          outdir: /tmp/gardener-gdc-release/ocm
+          post-process: none
+          upload-artifact-name: ''
+
+      - name: Finalize OCM Certified Sources
+        id: ocm_finalize
+        if: steps.ocm_merge.outcome == 'success'
+        env:
+          OCM_SOURCES_FILE: /tmp/gardener-gdc-release/ocm-sources.json
+        run: |
+          bash ./scripts/release/helpers/finalize_component_descriptor.sh \
+            /tmp/gardener-gdc-release/ocm/component-descriptor.yaml \
+            /tmp/gardener-gdc-release/ocm/component-descriptor.tar.gz
+
+      - name: Upload OCM Component Descriptor Artifact
+        id: ocm_artifact
+        if: steps.ocm_finalize.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdc-component-descriptor
+          path: /tmp/gardener-gdc-release/ocm/component-descriptor.tar.gz
+          if-no-files-found: error
+
+      - name: Authenticate to OCM Repository
+        id: ocm_auth
+        if: steps.ocm_finalize.outcome == 'success'
+        uses: gardener/cc-utils/.github/actions/oci-auth@v1
+        with:
+          oci-image-reference: ${{ steps.gardener_params.outputs.ocm-repository }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate OCM Component Descriptor
+        id: ocm_validate
+        if: steps.ocm_finalize.outcome == 'success'
+        uses: gardener/cc-utils/.github/actions/ocm-validate@v1
+        with:
+          component-descriptor-path: /tmp/gardener-gdc-release/ocm/component-descriptor.yaml
+          validation-cfg: |
+            schema: fail
+            access: fail
+            artefact-uniqueness: fail
+          recursion-depth: 0
+
+      - name: Publish OCM Component Descriptor
+        id: ocm_publish
+        if: steps.ocm_finalize.outcome == 'success'
+        run: |
+          python -m ocm upload \
+            --file /tmp/gardener-gdc-release/ocm/component-descriptor.yaml \
+            --blobs-dir /tmp/gardener-gdc-release/ocm/blobs.d \
+            --on-exist overwrite
+
+      - name: Attach Component Descriptor to Extension GitHub Release
+        id: ocm_release_asset
+        if: steps.ocm_finalize.outcome == 'success' && steps.ocm_inputs.outputs.attach == 'true'
+        env:
+          # The extension provider lives in a separate repository, so GITHUB_TOKEN
+          # (scoped to gardener-gdc-ci) cannot edit its release; use the release PAT.
+          GH_TOKEN: ${{ env.GDC_RELEASE_GITHUB_TOKEN }}
+          EXT_REPO_SLUG: ${{ steps.ocm_inputs.outputs.source_repository }}
+          EXT_RELEASE_VERSION: ${{ steps.ocm_inputs.outputs.source_version }}
+        run: |
+          gh release upload "${EXT_RELEASE_VERSION}" \
+            /tmp/gardener-gdc-release/ocm/component-descriptor.yaml \
+            --repo "${EXT_REPO_SLUG}" --clobber
+
+      - name: Stage 10 - Update Release Pipeline Dashboard & Summary
         if: always()
         env:
           PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry && format('{0}/gardener/gardener-gdc-ci', steps.gardener_params.outputs.oci-registry) || 'europe-docker.pkg.dev/gardener-project/snapshots/gardener/gardener-gdc-ci' }}
@@ -228,8 +415,19 @@ jobs:
           STAGE_TEST_SHOOT_STATUS: ${{ steps.stage_test_shoot.outcome }}
           STAGE_TEARDOWN_STATUS: ${{ steps.stage_teardown.outcome }}
           STAGE_PUBLISH_STATUS: ${{ steps.stage_publish.outcome }}
+          OCM_STEPS_JSON: ${{ toJSON(steps) }}
+          OCM_DESCRIPTOR_ARTIFACT_URL: ${{ steps.ocm_artifact.outputs.artifact-url }}
           OVERALL_PIPELINE_STATUS: ${{ job.status }}
-        run: ./scripts/release/9-update_dashboard.sh
+        run: |
+          export STAGE_OCM_STATUS="$(python3 -c '
+          import json, os
+          steps = json.loads(os.environ["OCM_STEPS_JSON"])
+          outcomes = [step["outcome"] for name, step in steps.items() if name.startswith("ocm_")]
+          print("failure" if "failure" in outcomes else
+                "cancelled" if "cancelled" in outcomes else
+                steps.get("ocm_publish", {}).get("outcome", "skipped"))
+          ')"
+          ./scripts/release/9-update_dashboard.sh
 
       - name: Deploy Release Pipeline Dashboard to GitHub Pages
         if: always() && github.ref == 'refs/heads/main' && needs.authorize.outputs.pr_number == ''

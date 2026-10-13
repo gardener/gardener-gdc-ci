@@ -23,6 +23,7 @@ Each pipeline run executes the following end-to-end qualification flow:
 3. **Provision & Validate Tenant Shoot Cluster**: Provisions a tenant Shoot cluster on GDC and executes functional test suites (worker scaling, persistent storage, pod/node networking, load balancers, DNS lifecycle, and etcd backup/restore) followed by the CNCF Kubernetes Conformance suite (`sonobuoy`).
 4. **Teardown Environment**: Cleans up all Shoot, Seed, and Virtual Garden test resources (capturing diagnostic snapshots automatically if any stage fails).
 5. **Publish Certified Artifacts & Tag Releases**: Promotes verified images and Helm charts to the Gardener registry (`snapshots` or `releases`) and, on official release runs, creates the Git release tags and bumps component `VERSION` files to the next `-dev` version.
+6. **Build and Publish an OCM Component Descriptor**: Publishes a descriptor for the certified GDC bundle, including its OCI images, Helm charts, tested source commits, and certification labels.
 
 ---
 
@@ -108,3 +109,5 @@ Artifact versions are derived from the root `VERSION` file in each component rep
 | `gardener-extension-provider-gdch-helm` | Helm Chart | `gardener/gardener-extension-provider-gdc` | `${VERSION#v}-<ext_sha>` (e.g. `0.5.3-dev-8e432a2`) | `${RELEASE_VER#v}` (e.g. `0.5.3`) |
 | `admission-gdch-application-helm` | Helm Chart | `gardener/gardener-extension-provider-gdc` | `${VERSION#v}-<ext_sha>` (e.g. `0.5.3-dev-8e432a2`) | `${RELEASE_VER#v}` (e.g. `0.5.3`) |
 | `admission-gdch-runtime-helm` | Helm Chart | `gardener/gardener-extension-provider-gdc` | `${VERSION#v}-<ext_sha>` (e.g. `0.5.3-dev-8e432a2`) | `${RELEASE_VER#v}` (e.g. `0.5.3`) |
+
+After successful public promotion, the pipeline also publishes the certified extension as the OCM component `github.com/gardener/gardener-extension-provider-gdc:<release-version>`. The provider and admission images/charts are local resources; the certified MCM and CCM images are external dependency resources. The descriptor records the tested extension, MCM, and CCM source commits. The external-dns artifact is used by the certification pipeline but is not part of this component vector. Official release descriptors are preserved on subsequent no-change runs. New descriptors are retained as the `gdc-component-descriptor` workflow artifact. On official extension releases, gosec runs before the extension release images are built; its report is attached when available.

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Google LLC
+#
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+SCRIPT = Path(__file__).with_name("generate_component_descriptor_fragments.py")
+
+
+class GenerateComponentDescriptorFragmentsTest(unittest.TestCase):
+    def test_scan_setup_failures_do_not_abort_release(self):
+        publish_script = SCRIPT.parent.parent / "8-publish_release_artifacts.sh"
+        scan_function = publish_script.read_text().split("run_gosec_sast_scan() {", 1)[1].split(
+            "\nbuild_and_publish_extension_release_images()", 1
+        )[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hack").mkdir()
+            (root / "hack" / "sast.sh").write_text("exit 0\n")
+            for failure in ("download", "list", "install"):
+                with self.subTest(failure=failure):
+                    result = subprocess.run([
+                        "bash", "-c", """
+set -euo pipefail
+go() {
+  case "$1 $2" in
+    'mod download') [[ "$FAILURE" != download ]] ;;
+    'list -m') [[ "$FAILURE" != list ]] && printf '%s\n' "$SCAN_DIR" ;;
+    'install github.com/securego/gosec/v2/cmd/gosec@v2.29.0') [[ "$FAILURE" != install ]] ;;
+    *) return 99 ;;
+  esac
+}
+run_gosec_sast_scan() {""" + scan_function + """
+run_gosec_sast_scan "$SCAN_DIR" "$SCAN_DIR/report.sarif"
+printf 'release-continues\n'
+""",
+                    ], env={**os.environ, "FAILURE": failure, "SCAN_DIR": str(root),
+                            "RELEASE_WORK_DIR": str(root)}, capture_output=True, text=True, check=True)
+                    self.assertIn("release-continues", result.stdout)
+                    self.assertIn("::warning::", result.stderr)
+
+    def test_generates_local_and_external_image_and_chart_fragments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            resources = root / "resources.json"
+            sources = root / "sources.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "sources": [
+                            {
+                                "name": name,
+                                "repository": f"https://github.com/gardener/{name}.git",
+                                "ref": "main",
+                                "commitSHA": "abc1234",
+                                "version": "v1.2.3",
+                            }
+                            for name in (
+                                "gardener-extension-provider-gdc",
+                                "machine-controller-manager-provider-gdc",
+                                "cloud-provider-gdc",
+                                "external-dns-management",
+                            )
+                        ],
+                        "images": [
+                            {
+                                "component": "gardener-extension-provider-gdch",
+                                "version": "v1.2.3",
+                                "image": "registry.example/provider:v1.2.3",
+                            },
+                            {
+                                "component": "machine-controller-manager-provider-gdch",
+                                "version": "v1.2.3",
+                                "image": "registry.example/image:v1.2.3",
+                            },
+                            {
+                                "component": "cloud-controller-manager-gdch",
+                                "version": "v1.2.3",
+                                "image": "registry.example/ccm:v1.2.3",
+                            },
+                            {
+                                "component": "external-dnsman2-gdch",
+                                "version": "v0.53.0",
+                                "image": "registry.example/external-dns:v0.53.0",
+                            },
+                        ],
+                        "charts": [
+                            "oci://registry.example/charts/example-chart:1.2.3"
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPT),
+                    "--manifest",
+                    str(manifest),
+                    "--resources",
+                    str(resources),
+                    "--sources",
+                    str(sources),
+                ],
+                check=True,
+            )
+
+            generated_resources = json.loads(resources.read_text(encoding="utf-8"))
+            self.assertEqual(len(generated_resources), 4)
+            self.assertEqual(generated_resources[0]["relation"], "local")
+            self.assertEqual(generated_resources[1]["relation"], "external")
+            self.assertEqual(generated_resources[3]["type"], "helmChart")
+            self.assertEqual(generated_resources[3]["version"], "1.2.3")
+            image_vector_names = {
+                resource["name"]: label["value"]
+                for resource in generated_resources
+                for label in resource["labels"]
+                if label["name"] == "imagevector.gardener.cloud/name"
+            }
+            self.assertEqual(image_vector_names, {
+                "machine-controller-manager-provider-gdch": "machine-controller-manager-provider-gdch",
+                "cloud-controller-manager-gdch": "cloud-controller-manager",
+            })
+            self.assertNotIn("external-dnsman2-gdch", [resource["name"] for resource in generated_resources])
+            generated_sources = json.loads(sources.read_text(encoding="utf-8"))
+            self.assertEqual([source["name"] for source in generated_sources], [
+                "main-source",
+                "machine-controller-manager-provider-gdc",
+                "cloud-provider-gdc",
+            ])
+            self.assertEqual(generated_sources[0]["access"], {
+                "type": "github",
+                "repoUrl": "github.com/gardener/gardener-extension-provider-gdc",
+                "ref": "main",
+                "commit": "abc1234",
+            })
+
+    @unittest.skipUnless(shutil.which("yq"), "finalization requires yq")
+    def test_finalization_only_skips_main_source_scanning_with_attached_report(self):
+        for has_report in (False, True):
+            with self.subTest(has_report=has_report), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor = root / "component-descriptor.yaml"
+                sources = root / "sources.json"
+                sources.write_text(json.dumps([
+                    {"name": "main-source", "labels": []},
+                    {"name": "dependency-source", "labels": []},
+                ]))
+                descriptor.write_text(json.dumps({"component": {
+                    "sources": [{"name": "ci-source"}],
+                    "resources": [{"name": "gosec-report"}] if has_report else [],
+                }}))
+                subprocess.run([
+                    "bash", str(SCRIPT.with_name("finalize_component_descriptor.sh")),
+                    str(descriptor), str(root / "descriptor.tar.gz"),
+                ], env={**os.environ, "OCM_SOURCES_FILE": str(sources)}, check=True)
+                finalized = json.loads(subprocess.check_output([
+                    "yq", "-o=json", ".component.sources", str(descriptor),
+                ]))
+                self.assertEqual([source["name"] for source in finalized], [
+                    "main-source", "dependency-source",
+                ])
+                self.assertEqual(finalized[1]["labels"], [])
+                if has_report:
+                    self.assertEqual(finalized[0]["labels"][0]["value"]["policy"], "skip")
+                else:
+                    self.assertEqual(finalized[0]["labels"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

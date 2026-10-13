@@ -11,7 +11,7 @@ source "${SCRIPT_DIR}/helpers/constants.sh"
 # shellcheck source=scripts/ci-common.sh
 source "${REPO_ROOT}/scripts/ci-common.sh"
 
-echo "=== Stage 9: Update Release Pipeline Dashboard & Job Summary ==="
+echo "=== Stage 10: Update Release Pipeline Dashboard & Job Summary ==="
 
 DASHBOARD_DATA_FILE="${DASHBOARD_DATA_FILE:-${REPO_ROOT}/dashboard/data/runs.json}"
 mkdir -p "$(dirname "${DASHBOARD_DATA_FILE}")"
@@ -34,6 +34,7 @@ STAGE_DEPLOY_SHOOT="${STAGE_DEPLOY_SHOOT_STATUS:-unknown}"
 STAGE_TEST_SHOOT="${STAGE_TEST_SHOOT_STATUS:-unknown}"
 STAGE_TEARDOWN="${STAGE_TEARDOWN_STATUS:-unknown}"
 STAGE_PUBLISH="${STAGE_PUBLISH_STATUS:-skipped}"
+STAGE_OCM="${STAGE_OCM_STATUS:-skipped}"
 OVERALL_STATUS="${OVERALL_PIPELINE_STATUS:-failure}"
 DURATION="${PIPELINE_DURATION:-N/A}"
 
@@ -75,6 +76,7 @@ NEW_ENTRY="$(jq -n \
   --arg stageTest "${STAGE_TEST_SHOOT}" \
   --arg stageTeardown "${STAGE_TEARDOWN}" \
   --arg stagePublish "${STAGE_PUBLISH}" \
+  --arg stageOCM "${STAGE_OCM}" \
   '{
     runId: $runId,
     runNumber: $runNumber,
@@ -100,7 +102,8 @@ NEW_ENTRY="$(jq -n \
       deployShoot: $stageShoot,
       testShoot: $stageTest,
       teardown: $stageTeardown,
-      publish: $stagePublish
+      publish: $stagePublish,
+      ocm: $stageOCM
     }
   }')"
 
@@ -151,6 +154,11 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 | **Candidate Registry** | \`${GHCR_REGISTRY}\` |
 | **Public Registry** | \`${PUBLIC_REGISTRY}\` |
 | **Release Dashboard** | [https://gardener.github.io/gardener-gdc-ci/](https://gardener.github.io/gardener-gdc-ci/) |
+EOF
+  if [[ -n "${OCM_DESCRIPTOR_ARTIFACT_URL:-}" ]]; then
+    printf '| **OCM Component Descriptor** | [Download descriptor](%s) |\n' "${OCM_DESCRIPTOR_ARTIFACT_URL}" >> "${GITHUB_STEP_SUMMARY}"
+  fi
+  cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
 
 ### Stage Progress
 
@@ -163,6 +171,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 | 6. Shoot E2E & Conformance (\`sonobuoy\`) | \`${STAGE_TEST_SHOOT}\` |
 | 7. Teardown Stack (\`teardown\`) | \`${STAGE_TEARDOWN}\` |
 | 8. Promote Certified Artifacts to Public Registry | \`${STAGE_PUBLISH}\` |
+| 9. Publish OCM Component Descriptor | \`${STAGE_OCM}\` |
 EOF
 fi
 

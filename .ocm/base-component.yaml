@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Google LLC
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: github.com/gardener/gardener-extension-provider-gdc
+provider: Google LLC
+labels:
+  - name: cloud.gardener.cnudie/responsibles
+    value:
+      - type: githubTeam
+        teamname: gardener-extension-provider-gdc-maintainers
+        github_hostname: github.com

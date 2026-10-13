@@ -215,7 +215,7 @@
       tbody.innerHTML = filtered.map(r => {
         const mode = (r.releaseMode || 'snapshot').toLowerCase();
         const st = r.stages || {};
-        const stageBadges = ['build', 'deployGarden', 'deploySeed', 'deployShoot', 'testShoot', 'teardown', 'publish']
+        const stageBadges = ['build', 'deployGarden', 'deploySeed', 'deployShoot', 'testShoot', 'teardown', 'publish', 'ocm']
           .map(k => `<span class="badge ${st[k] || 'unknown'}" title="${k}: ${st[k] || 'unknown'}">${(st[k] || '-')[0]}</span>`)
           .join(' ');
         const comp = r.components || {};
@@ -268,7 +268,8 @@
         ['deployShoot', '5. GDC Shoot'],
         ['testShoot', '6. E2E & Conformance'],
         ['teardown', '7. Teardown'],
-        ['publish', '8. Publish Artifacts']
+        ['publish', '8. Publish Artifacts'],
+        ['ocm', '9. Publish OCM Descriptor']
       ];
 
       const latestStagesEl = document.getElementById('latest-stages');

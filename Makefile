@@ -88,6 +88,7 @@ test: unittests
 unittests:
 	@go test -race -timeout=3m ./integration/pkg/...
 	@python3 ./scripts/release/helpers/generate_release_notes_test.py
+	@python3 ./scripts/release/helpers/generate_component_descriptor_fragments_test.py
 
 .PHONY: help
 help: ## Display available targets

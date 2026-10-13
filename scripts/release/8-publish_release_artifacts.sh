@@ -34,6 +34,21 @@ EXT_LAST_TAG="$(yq -r '.components.gardenerExtensionProviderGDC.lastReleaseTag /
 MCM_LAST_TAG="$(yq -r '.components.machineControllerManagerProviderGDC.lastReleaseTag // ""' "${RELEASE_METADATA_FILE}")"
 CCM_LAST_TAG="$(yq -r '.components.cloudProviderGDC.lastReleaseTag // ""' "${RELEASE_METADATA_FILE}")"
 EXT_COMMIT_SHA="$(yq -r '.components.gardenerExtensionProviderGDC.commitSHA // ""' "${RELEASE_METADATA_FILE}")"
+EXT_REPO="$(yq -r '.components.gardenerExtensionProviderGDC.repository' "${RELEASE_METADATA_FILE}")"
+EXT_REF="$(yq -r '.components.gardenerExtensionProviderGDC.ref' "${RELEASE_METADATA_FILE}")"
+MCM_COMMIT_SHA="$(yq -r '.components.machineControllerManagerProviderGDC.commitSHA // ""' "${RELEASE_METADATA_FILE}")"
+MCM_REPO="$(yq -r '.components.machineControllerManagerProviderGDC.repository' "${RELEASE_METADATA_FILE}")"
+MCM_REF="$(yq -r '.components.machineControllerManagerProviderGDC.ref' "${RELEASE_METADATA_FILE}")"
+DNS_COMMIT_SHA="$(yq -r '.components.externalDNSManagement.commitSHA // ""' "${RELEASE_METADATA_FILE}")"
+DNS_REPO="$(yq -r '.components.externalDNSManagement.repository' "${RELEASE_METADATA_FILE}")"
+DNS_REF="$(yq -r '.components.externalDNSManagement.ref' "${RELEASE_METADATA_FILE}")"
+CCM_COMMIT_SHA="$(yq -r '.components.cloudProviderGDC.commitSHA // ""' "${RELEASE_METADATA_FILE}")"
+CCM_REPO="$(yq -r '.components.cloudProviderGDC.repository' "${RELEASE_METADATA_FILE}")"
+CCM_REF="$(yq -r '.components.cloudProviderGDC.ref' "${RELEASE_METADATA_FILE}")"
+EXT_CHART_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION#v}"
+
+# Optional OCM attachments must belong to this run, including local reruns.
+rm -f "${RELEASE_WORK_DIR}/gdc-release-notes.md" "${RELEASE_ARTIFACTS_DIR}/gosec-report.sarif"
 
 IMAGES=()
 
@@ -143,7 +158,8 @@ tag_and_bump_gdc_repository() {
   local next_op="$4"
   local last_tag="$5"
   local subcomponent_notes_out="$6"
-  shift 6
+  local persist_notes_out="$7"
+  shift 7
   local extra_notes_args=("$@")
 
   local repo_slug="${repo_url#https://github.com/}"
@@ -204,6 +220,12 @@ tag_and_bump_gdc_repository() {
     "${sub_args[@]}" \
     "${extra_notes_args[@]}"
 
+  # Persist the aggregated release notes outside the temp dir so later pipeline stages
+  # (e.g. embedding them into the OCM component descriptor) can consume them.
+  if [[ -n "${persist_notes_out}" ]]; then
+    cp "${notes_file}" "${persist_notes_out}"
+  fi
+
   # 1. Commit `release vX.Y.Z` (stripping `-dev` in VERSION + updated imagevector/images.yaml if present), tag `vX.Y.Z`, and push
   echo "${release_ver}" > "${work_dir}/VERSION"
   git -C "${work_dir}" add VERSION
@@ -246,10 +268,50 @@ tag_and_bump_gdc_repository() {
   rm -rf "${work_dir}"
 }
 
-# For `gardener-extension-provider-gdc` in `release` mode:
-#   1. Clone extension-provider repo and check out the exact commit hash (`EXT_COMMIT_SHA`) used to run the pipeline.
-#   2. Apply the desired changes in `imagevector/images.yaml` (and set `VERSION` to the release version).
-#   3. Compile and build the fresh Docker images and push them directly to the Gardener Release Registry.
+# Run gosec SAST on the extension source tree (already cloned at the certified commit)
+# and persist the SARIF report so it can be attached to the OCM component descriptor.
+# Report-only: findings and scan setup failures never fail the release.
+# Use a pinned gosec version supporting Go 1.26 with Gardener's canonical sast.sh.
+run_gosec_sast_scan() {
+  local src_dir="$1"
+  local report_out="$2"
+  local gosec_version="v2.29.0"
+  local gosec_bin_dir="${RELEASE_WORK_DIR}/sast-bin"
+
+  # Resolve dependencies before locating the module's scan script or running gosec.
+  if ! ( cd "${src_dir}" && go mod download ); then
+    echo "::warning::Could not resolve scan dependencies; skipping gosec SAST scan." >&2
+    return 0
+  fi
+  local gardener_hack_dir
+  if ! gardener_hack_dir="$(cd "${src_dir}" && go list -m -f '{{.Dir}}' github.com/gardener/gardener)"; then
+    echo "::warning::Could not locate Gardener module; skipping gosec SAST scan." >&2
+    return 0
+  fi
+  gardener_hack_dir="${gardener_hack_dir}/hack"
+  if [[ ! -f "${gardener_hack_dir}/sast.sh" ]]; then
+    echo "::warning::Gardener sast.sh not found at ${gardener_hack_dir}; skipping gosec SAST scan." >&2
+    return 0
+  fi
+
+  echo "Installing gosec (${gosec_version}) for SAST scan of gardener-extension-provider-gdc..."
+  if ! GOBIN="${gosec_bin_dir}" go install "github.com/securego/gosec/v2/cmd/gosec@${gosec_version}"; then
+    echo "::warning::Could not install gosec; skipping SAST scan." >&2
+    return 0
+  fi
+
+  echo "Running gosec SAST scan on gardener-extension-provider-gdc source (report-only)..."
+  # sast.sh invokes `gosec` from PATH; never abort the release on findings.
+  ( cd "${src_dir}" && PATH="${gosec_bin_dir}:${PATH}" bash "${gardener_hack_dir}/sast.sh" \
+      --gosec-report true --report-dir "$(dirname "${report_out}")" --report-fname "$(basename "${report_out}")" ) || true
+
+  if [[ -s "${report_out}" ]]; then
+    echo "gosec SAST report written to ${report_out}."
+  else
+    echo "::warning::gosec did not produce a SARIF report; SAST resource will be omitted." >&2
+  fi
+}
+
 build_and_publish_extension_release_images() {
   local repo_url="$1"
   local exact_sha="$2"
@@ -269,6 +331,9 @@ build_and_publish_extension_release_images() {
     "${PUBLIC_REGISTRY}"
   echo "${release_ver}" > "${ext_build_dir}/VERSION"
 
+  # Scan the release source before building or publishing its images.
+  run_gosec_sast_scan "${ext_build_dir}" "${RELEASE_ARTIFACTS_DIR}/gosec-report.sarif"
+
   echo "Compiling and building gardener-extension-provider-gdc Docker images (${release_ver})..."
   REGISTRY="${PUBLIC_REGISTRY}" IMAGE_TAG="${release_ver}" make -C "${ext_build_dir}" docker-images
 
@@ -285,15 +350,9 @@ build_and_publish_extension_release_images() {
 
 if [[ "${RELEASE_MODE}" == "release" ]]; then
   echo "=== Building Release Extension Images, Updating imagevector/images.yaml, Tagging & Bumping VERSION in Changed GDC Repositories ==="
-  EXT_REPO="$(yq -r '.components.gardenerExtensionProviderGDC.repository' "${RELEASE_METADATA_FILE}")"
-  EXT_REF="$(yq -r '.components.gardenerExtensionProviderGDC.ref' "${RELEASE_METADATA_FILE}")"
-  MCM_REPO="$(yq -r '.components.machineControllerManagerProviderGDC.repository' "${RELEASE_METADATA_FILE}")"
-  MCM_REF="$(yq -r '.components.machineControllerManagerProviderGDC.ref' "${RELEASE_METADATA_FILE}")"
-  CCM_REPO="$(yq -r '.components.cloudProviderGDC.repository' "${RELEASE_METADATA_FILE}")"
-  CCM_REF="$(yq -r '.components.cloudProviderGDC.ref' "${RELEASE_METADATA_FILE}")"
-
   MCM_SUBCOMPONENT_NOTES="${RELEASE_WORK_DIR}/mcm-subcomponent-notes.md"
   CCM_SUBCOMPONENT_NOTES="${RELEASE_WORK_DIR}/ccm-subcomponent-notes.md"
+  EXT_RELEASE_NOTES="${RELEASE_WORK_DIR}/gdc-release-notes.md"
   rm -f "${MCM_SUBCOMPONENT_NOTES}" "${CCM_SUBCOMPONENT_NOTES}"
 
   # 1. Release machine-controller-manager-provider-gdc first (if changed)
@@ -305,6 +364,7 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
       "${NEXT_VERSION}" \
       "${MCM_LAST_TAG}" \
       "${MCM_SUBCOMPONENT_NOTES}" \
+      "" \
       --oci-image "machine-controller-manager-provider-gdch=${PUBLIC_REGISTRY}/machine-controller-manager-provider-gdch:${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
   else
     echo "Skipping Git tag and VERSION bump for ${MCM_REPO}: no code changes since ${MCM_LAST_TAG}."
@@ -319,6 +379,7 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
       "${NEXT_VERSION}" \
       "${CCM_LAST_TAG}" \
       "${CCM_SUBCOMPONENT_NOTES}" \
+      "" \
       --oci-image "cloud-controller-manager-gdch=${PUBLIC_REGISTRY}/cloud-controller-manager-gdch:${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
   else
     echo "Skipping Git tag and VERSION bump for ${CCM_REPO}: no code changes since ${CCM_LAST_TAG}."
@@ -333,7 +394,6 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
       "${EXT_COMMIT_SHA}" \
       "${EXTENSION_GDC_ARTIFACTS_VERSION}"
 
-    EXT_CHART_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION#v}"
     EXT_NOTES_ARGS=(
       --helm-chart "admission-gdch-application-helm=${PUBLIC_REGISTRY}/charts/admission-gdch-application-helm:${EXT_CHART_VERSION}"
       --helm-chart "admission-gdch-runtime-helm=${PUBLIC_REGISTRY}/charts/admission-gdch-runtime-helm:${EXT_CHART_VERSION}"
@@ -360,6 +420,7 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
       "${NEXT_VERSION}" \
       "${EXT_LAST_TAG}" \
       "" \
+      "${EXT_RELEASE_NOTES}" \
       "${EXT_NOTES_ARGS[@]}"
   else
     echo "Skipping Git tag, image build, and VERSION bump for ${EXT_REPO}: no code changes since ${EXT_LAST_TAG}."
@@ -374,6 +435,30 @@ jq -n \
   --arg certifiedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
   --arg workflowRunId "${GITHUB_RUN_ID:-local}" \
   --arg publicRegistry "${PUBLIC_REGISTRY}" \
+  --arg extRepo "${EXT_REPO}" \
+  --arg extRef "${EXT_REF}" \
+  --arg extCommitSHA "${EXT_COMMIT_SHA}" \
+  --arg extVersion "${EXTENSION_GDC_ARTIFACTS_VERSION}" \
+  --arg mcmRepo "${MCM_REPO}" \
+  --arg mcmRef "${MCM_REF}" \
+  --arg mcmCommitSHA "${MCM_COMMIT_SHA}" \
+  --arg mcmVersion "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" \
+  --arg dnsRepo "${DNS_REPO}" \
+  --arg dnsRef "${DNS_REF}" \
+  --arg dnsCommitSHA "${DNS_COMMIT_SHA}" \
+  --arg dnsVersion "${EXTERNAL_DNS_ARTIFACTS_VERSION}" \
+  --arg ccmRepo "${CCM_REPO}" \
+  --arg ccmRef "${CCM_REF}" \
+  --arg ccmCommitSHA "${CCM_COMMIT_SHA}" \
+  --arg ccmVersion "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}" \
+  --arg extImage "${PUBLIC_REGISTRY}/gardener-extension-provider-gdch:${EXTENSION_GDC_ARTIFACTS_VERSION}" \
+  --arg admissionImage "${PUBLIC_REGISTRY}/gardener-extension-admission-gdch:${EXTENSION_GDC_ARTIFACTS_VERSION}" \
+  --arg mcmImage "${PUBLIC_REGISTRY}/machine-controller-manager-provider-gdch:${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" \
+  --arg ccmImage "${PUBLIC_REGISTRY}/cloud-controller-manager-gdch:${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}" \
+  --arg dnsImage "${PUBLIC_REGISTRY}/external-dnsman2-gdch:${EXTERNAL_DNS_ARTIFACTS_VERSION}" \
+  --arg providerChart "oci://${PUBLIC_REGISTRY}/charts/gardener-extension-provider-gdch-helm:${EXT_CHART_VERSION}" \
+  --arg admissionApplicationChart "oci://${PUBLIC_REGISTRY}/charts/admission-gdch-application-helm:${EXT_CHART_VERSION}" \
+  --arg admissionRuntimeChart "oci://${PUBLIC_REGISTRY}/charts/admission-gdch-runtime-helm:${EXT_CHART_VERSION}" \
   --argjson images "${PUBLISHED_IMAGES_JSON}" \
   --argjson charts "${PUBLISHED_CHARTS_JSON}" \
   '{
@@ -382,8 +467,22 @@ jq -n \
     certifiedAt: $certifiedAt,
     workflowRunId: $workflowRunId,
     publicRegistry: $publicRegistry,
-    images: $images,
-    charts: $charts
+    promotedImages: $images,
+    promotedCharts: $charts,
+    sources: [
+      {name: "gardener-extension-provider-gdc", repository: $extRepo, ref: $extRef, commitSHA: $extCommitSHA, version: $extVersion},
+      {name: "machine-controller-manager-provider-gdc", repository: $mcmRepo, ref: $mcmRef, commitSHA: $mcmCommitSHA, version: $mcmVersion},
+      {name: "external-dns-management", repository: $dnsRepo, ref: $dnsRef, commitSHA: $dnsCommitSHA, version: $dnsVersion},
+      {name: "cloud-provider-gdc", repository: $ccmRepo, ref: $ccmRef, commitSHA: $ccmCommitSHA, version: $ccmVersion}
+    ],
+    images: [
+      {component: "gardener-extension-provider-gdch", image: $extImage, version: $extVersion},
+      {component: "gardener-extension-admission-gdch", image: $admissionImage, version: $extVersion},
+      {component: "machine-controller-manager-provider-gdch", image: $mcmImage, version: $mcmVersion},
+      {component: "cloud-controller-manager-gdch", image: $ccmImage, version: $ccmVersion},
+      {component: "external-dnsman2-gdch", image: $dnsImage, version: $dnsVersion}
+    ],
+    charts: [$providerChart, $admissionApplicationChart, $admissionRuntimeChart]
   }' > "${CERTIFIED_RELEASE_MANIFEST}"
 
 echo "Certified artifacts promoted to ${PUBLIC_REGISTRY}. Manifest written to ${CERTIFIED_RELEASE_MANIFEST}:"
