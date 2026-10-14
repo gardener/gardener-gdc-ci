@@ -68,6 +68,22 @@ has_code_changes_since_tag() {
   return 0
 }
 
+ext_release_has_ocm_descriptor() {
+  local repo_url="$1"
+  local tag="$2"
+  if [[ -z "${tag}" ]] || ! command -v gh >/dev/null 2>&1; then
+    return 0
+  fi
+  local repo_slug="${repo_url#https://github.com/}"
+  repo_slug="${repo_slug%.git}"
+  local push_token="${GDC_RELEASE_GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  local assets_list
+  if ! assets_list="$(GH_TOKEN="${push_token}" gh release view "${tag}" --repo "${repo_slug}" --json assets --jq '.assets[].name' 2>/dev/null)"; then
+    return 1
+  fi
+  grep -qxF "component-descriptor.yaml" <<< "${assets_list}"
+}
+
 RELEASE_MODE="${RELEASE_MODE:-snapshot}"
 NEXT_VERSION="${NEXT_VERSION:-bump-patch}"
 
@@ -121,6 +137,10 @@ if [[ "${RELEASE_MODE}" == "release" ]]; then
 
   if has_code_changes_since_tag "${EXT_DIR}" "${EXT_LAST_TAG}" || [[ "${MCM_NEEDS_RELEASE}" == "true" || "${CCM_NEEDS_RELEASE}" == "true" || "${EXT_IMAGEVECTOR_OUT_OF_SYNC}" == "true" ]]; then
     EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_BASE_VERSION%-dev}}"
+  elif ! ext_release_has_ocm_descriptor "${EXTENSION_GDC_REPO}" "${EXT_LAST_TAG}"; then
+    echo "Release ${EXT_LAST_TAG} on ${EXTENSION_GDC_REPO} is missing component-descriptor.yaml asset; re-running release promotion & OCM publication for ${EXT_LAST_TAG}."
+    EXT_NEEDS_RELEASE="true"
+    EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_LAST_TAG}}"
   else
     EXT_NEEDS_RELEASE="false"
     EXTENSION_GDC_ARTIFACTS_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION:-${EXT_LAST_TAG}}"

@@ -216,12 +216,21 @@ tag_and_bump_gdc_repository() {
   git -C "${work_dir}" config tag.gpgSign false
   git -C "${work_dir}" config tag.forceSignAnnotated false
 
+  local effective_from_tag="${last_tag}"
+  if [[ "${effective_from_tag}" == "${release_ver}" ]]; then
+    effective_from_tag="$(git -C "${work_dir}" tag --list 'v*' --sort=-v:refname | grep -vxF "${release_ver}" | head -n 1 || true)"
+  fi
+
   # If releasing gardener-extension-provider-gdc, update imagevector/images.yaml so the
   # release commit and main branch record the certified MCM and CCM versions.
   if [[ -f "${work_dir}/imagevector/images.yaml" ]]; then
-    local prev_mcm_tag prev_ccm_tag
-    prev_mcm_tag="$(read_imagevector_tag "${work_dir}/imagevector/images.yaml" "machine-controller-manager-provider-gdch")"
-    prev_ccm_tag="$(read_imagevector_tag "${work_dir}/imagevector/images.yaml" "cloud-controller-manager")"
+    local prev_mcm_tag prev_ccm_tag prev_imagevector_file="${work_dir}/imagevector/images.yaml"
+    if [[ -n "${effective_from_tag}" ]] && git -C "${work_dir}" show "${effective_from_tag}:imagevector/images.yaml" > "${work_dir}/prev-images.yaml" 2>/dev/null; then
+      prev_imagevector_file="${work_dir}/prev-images.yaml"
+    fi
+    prev_mcm_tag="$(read_imagevector_tag "${prev_imagevector_file}" "machine-controller-manager-provider-gdch")"
+    prev_ccm_tag="$(read_imagevector_tag "${prev_imagevector_file}" "cloud-controller-manager")"
+    rm -f "${work_dir}/prev-images.yaml"
     update_extension_imagevector "${work_dir}/imagevector/images.yaml" \
       "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" \
       "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}" \
@@ -246,11 +255,6 @@ tag_and_bump_gdc_repository() {
         extra_notes_args+=("--subcomponent-notes" "${CCM_SUBCOMPONENT_NOTES}")
       fi
     fi
-  fi
-
-  local effective_from_tag="${last_tag}"
-  if [[ "${effective_from_tag}" == "${release_ver}" ]]; then
-    effective_from_tag="$(git -C "${work_dir}" tag --list 'v*' --sort=-v:refname | grep -vxF "${release_ver}" | head -n 1 || true)"
   fi
 
   # Generate SAP Gardener-formatted release notes before creating the release commit
