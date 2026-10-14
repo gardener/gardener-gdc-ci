@@ -17,6 +17,8 @@ GARDENER_ARTIFACTS_VERSION="$(yq -r '.gardenerArtifactsVersion' "${RELEASE_METAD
 EXTERNAL_DNS_ARTIFACTS_VERSION="$(yq -r '.externalDNSArtifactsVersion' "${RELEASE_METADATA_FILE}")"
 EXTERNAL_DNS_MANAGEMENT_IMAGE_NAME="${EXTERNAL_DNS_MANAGEMENT_IMAGE_NAME:-external-dnsman2-gdch}"
 VIRTUAL_GARDEN_PROVIDER="${VIRTUAL_GARDEN_PROVIDER:-gke}"
+WORKER_POOL_MINIMUM="${WORKER_POOL_MINIMUM:-2}"
+WORKER_POOL_MAXIMUM="${WORKER_POOL_MAXIMUM:-2}"
 
 if ! go test -v -timeout=55m "${REPO_ROOT}/integration/release/shoot" \
   -args \
@@ -24,7 +26,9 @@ if ! go test -v -timeout=55m "${REPO_ROOT}/integration/release/shoot" \
   --gardener-artifacts-version="${GARDENER_ARTIFACTS_VERSION}" \
   --external-dns-artifacts-version="${EXTERNAL_DNS_ARTIFACTS_VERSION}" \
   --external-dns-management-image-name="${EXTERNAL_DNS_MANAGEMENT_IMAGE_NAME}" \
-  --virtual-garden-provider="${VIRTUAL_GARDEN_PROVIDER}"; then
+  --virtual-garden-provider="${VIRTUAL_GARDEN_PROVIDER}" \
+  --worker-pool-minimum="${WORKER_POOL_MINIMUM}" \
+  --worker-pool-maximum="${WORKER_POOL_MAXIMUM}"; then
   capture_snapshot "5-deploy-shoot"
   exit 1
 fi

@@ -48,6 +48,8 @@ var (
 	externalDNSManagementImageName = flag.String("external-dns-management-image-name", "external-dnsman2-gdch", "The name of the external DNS management image")
 	releaseConfigurationFilePath   = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
 	virtualGardenProvider          = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
+	workerPoolMinimum              = flag.Int("worker-pool-minimum", 2, "The minimum number of machines per worker pool")
+	workerPoolMaximum              = flag.Int("worker-pool-maximum", 2, "The maximum number of machines per worker pool")
 )
 
 const (
@@ -150,10 +152,10 @@ func TestCreateShootCluster(t *testing.T) {
 
 	// Create Shoot cluster
 	t.Logf("Creating Shoot cluster %s", releasePipelineCfg.TestShoot.Name)
-	createShoot(ctx, gardenClient, releasePipelineCfg, shootNodeCIDR, *gardenerArtifactsVersion, t)
+	createShoot(ctx, gardenClient, releasePipelineCfg, shootNodeCIDR, *gardenerArtifactsVersion, int32(*workerPoolMinimum), int32(*workerPoolMaximum), t)
 }
 
-func createShoot(ctx context.Context, gardenClient client.WithWatch, cfg *config.ReleaseTestConfig, shootNodeCIDR, gardenerArtifactsVersion string, t *testing.T) {
+func createShoot(ctx context.Context, gardenClient client.WithWatch, cfg *config.ReleaseTestConfig, shootNodeCIDR, gardenerArtifactsVersion string, workerMin, workerMax int32, t *testing.T) {
 	shoot := &gardencorev1beta1.Shoot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cfg.TestShoot.Name,
@@ -161,7 +163,7 @@ func createShoot(ctx context.Context, gardenClient client.WithWatch, cfg *config
 		},
 	}
 
-	shootSpec := newShootSpec(t, cfg, shootNodeCIDR, gardenerArtifactsVersion)
+	shootSpec := newShootSpec(t, cfg, shootNodeCIDR, gardenerArtifactsVersion, workerMin, workerMax)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, gardenClient, shoot, func() error {
 		shoot.Spec = shootSpec
@@ -351,6 +353,13 @@ func validateFlags(t *testing.T) error {
 		if *value == "" {
 			t.Fatalf("--%s is a required flag", name)
 		}
+	}
+
+	if *workerPoolMinimum <= 0 {
+		t.Fatalf("--worker-pool-minimum must be greater than 0, got %d", *workerPoolMinimum)
+	}
+	if *workerPoolMaximum < *workerPoolMinimum {
+		t.Fatalf("--worker-pool-maximum (%d) must be greater than or equal to --worker-pool-minimum (%d)", *workerPoolMaximum, *workerPoolMinimum)
 	}
 
 	return nil

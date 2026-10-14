@@ -46,8 +46,8 @@ const (
 )
 
 // newShootSpec constructs the spec for the Shoot cluster using the provided configuration.
-func newShootSpec(t *testing.T, cfg *config.ReleaseTestConfig, shootNodeCIDR, gardenerArtifactsVersion string) gardencorev1beta1.ShootSpec {
-	t.Logf("Creating Shoot spec for Gardener-GDC with zones: %v", cfg.GDC.Zones)
+func newShootSpec(t *testing.T, cfg *config.ReleaseTestConfig, shootNodeCIDR, gardenerArtifactsVersion string, workerPoolMinimum, workerPoolMaximum int32) gardencorev1beta1.ShootSpec {
+	t.Logf("Creating Shoot spec for Gardener-GDC with zones: %v (worker pool minimum=%d, maximum=%d)", cfg.GDC.Zones, workerPoolMinimum, workerPoolMaximum)
 	var workerPools []gardencorev1beta1.Worker
 	var infraConfigZones []map[string]interface{}
 	shootNodeCIDRs, err := splitCIDR(shootNodeCIDR)
@@ -59,8 +59,8 @@ func newShootSpec(t *testing.T, cfg *config.ReleaseTestConfig, shootNodeCIDR, ga
 		t.Logf("Adding worker pool %s for zone %s", fmt.Sprintf("%s-%s", "pool-", zoneIdentifier), zone)
 		workerPools = append(workerPools, gardencorev1beta1.Worker{
 			Name:    fmt.Sprintf("%s-%s", "pool-", zoneIdentifier),
-			Minimum: 2,
-			Maximum: 2,
+			Minimum: workerPoolMinimum,
+			Maximum: workerPoolMaximum,
 			Machine: gardencorev1beta1.Machine{
 				Type:         gdcMachineType,
 				Architecture: ptr.To("amd64"),
