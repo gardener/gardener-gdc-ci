@@ -78,15 +78,10 @@
     }
     .badge.success, .badge.completed { background: rgba(34, 197, 94, 0.18); color: var(--success); }
     .badge.failure { background: rgba(239, 68, 68, 0.18); color: var(--failure); }
-    .badge.running, .badge.in_progress, .badge.queued, .badge.waiting { background: rgba(59, 130, 246, 0.18); color: var(--running); }
-    .badge.pending, .badge.skipped, .badge.unknown, .badge.cancelled { background: rgba(100, 116, 139, 0.2); color: var(--muted); }
+    .badge.running, .badge.in_progress, .badge.queued { background: rgba(59, 130, 246, 0.18); color: var(--running); }
+    .badge.skipped, .badge.unknown, .badge.cancelled { background: rgba(100, 116, 139, 0.2); color: var(--muted); }
     .badge.release { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
     .badge.snapshot { background: rgba(14, 165, 233, 0.2); color: #38bdf8; }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.45; }
-    }
-    .badge.running, .badge.in_progress { animation: pulse 1.8s ease-in-out infinite; }
     .toolbar {
       display: flex;
       justify-content: space-between;
@@ -166,7 +161,7 @@
     </div>
 
     <div class="card" style="margin-bottom: 24px;">
-      <div class="kpi-label" id="latest-stages-label">Latest Pipeline Execution Stage Progress</div>
+      <div class="kpi-label">Latest Pipeline Execution Stage Progress</div>
       <div class="pipeline-stages" id="latest-stages"></div>
     </div>
 
@@ -192,7 +187,7 @@
             <th>Status</th>
             <th>Artifacts Version(Ext / MCM / CCM / DNS)</th>
             <th>Component Commits (Ext / MCM / CCM / DNS)</th>
-            <th>Stages (B / G / S / Sh / T / Td / Pub / OCM)</th>
+            <th>Stages (B / G / S / Sh / T / Td / Pub)</th>
             <th>Duration</th>
           </tr>
         </thead>
@@ -202,149 +197,7 @@
   </div>
 
   <script>
-    const GITHUB_WORKFLOW_RUNS_API = 'https://api.github.com/repos/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml/runs?per_page=10';
-    const STAGE_ORDER = [
-      ['build', '1. Build (GHCR)'],
-      ['deployGarden', '3. Virtual Garden'],
-      ['deploySeed', '4. GDC Seed'],
-      ['deployShoot', '5. GDC Shoot'],
-      ['testShoot', '6. E2E & Conformance'],
-      ['teardown', '7. Teardown'],
-      ['publish', '8. Publish Artifacts'],
-      ['ocm', '9. Publish OCM Descriptor']
-    ];
-
     let allRuns = [];
-    let durationTimerId = null;
-    let pollTimerId = null;
-
-    function formatDurationSeconds(totalSecs) {
-      if (!Number.isFinite(totalSecs) || totalSecs < 0) return 'N/A';
-      const secs = Math.floor(totalSecs % 60);
-      const mins = Math.floor((totalSecs % 3600) / 60);
-      const hours = Math.floor(totalSecs / 3600);
-      if (hours > 0) return `${hours}h ${mins}m ${secs}s`;
-      if (mins > 0) return `${mins}m ${secs}s`;
-      return `${secs}s`;
-    }
-
-    function computeLiveDuration(run) {
-      if ((run.status === 'in_progress' || run.status === 'running' || run.status === 'queued' || run.status === 'waiting') && run.startedAtMs) {
-        return formatDurationSeconds((Date.now() - run.startedAtMs) / 1000);
-      }
-      return run.duration || 'N/A';
-    }
-
-    function mapStepState(step) {
-      if (!step) return 'pending';
-      if (step.status === 'in_progress') return 'running';
-      if (step.status === 'completed') return step.conclusion || 'completed';
-      return 'pending';
-    }
-
-    function extractStagesFromJob(job) {
-      const defaultStages = {
-        build: 'pending',
-        deployGarden: 'pending',
-        deploySeed: 'pending',
-        deployShoot: 'pending',
-        testShoot: 'pending',
-        teardown: 'pending',
-        publish: 'pending',
-        ocm: 'pending'
-      };
-      if (!job || !Array.isArray(job.steps)) return defaultStages;
-
-      const byPrefix = prefix => job.steps.find(s => (s.name || '').startsWith(prefix));
-      const ocmSteps = job.steps.filter(s =>
-        (s.name || '').startsWith('Stage 9 -') ||
-        (s.name || '').includes('OCM') ||
-        (s.name || '').startsWith('Attach Component Descriptor')
-      );
-
-      let ocmState = 'pending';
-      if (ocmSteps.some(s => s.status === 'in_progress')) {
-        ocmState = 'running';
-      } else if (ocmSteps.some(s => s.conclusion === 'failure')) {
-        ocmState = 'failure';
-      } else if (ocmSteps.some(s => s.conclusion === 'cancelled')) {
-        ocmState = 'cancelled';
-      } else {
-        const publishStep = job.steps.find(s => s.name === 'Publish OCM Component Descriptor');
-        const prepStep = byPrefix('Stage 9 -');
-        if (publishStep && publishStep.status === 'completed') {
-          ocmState = publishStep.conclusion || 'completed';
-        } else if (prepStep && prepStep.status === 'completed' && prepStep.conclusion === 'skipped') {
-          ocmState = 'skipped';
-        }
-      }
-
-      return {
-        build: mapStepState(byPrefix('Stage 1 -')),
-        deployGarden: mapStepState(byPrefix('Stage 3 -')),
-        deploySeed: mapStepState(byPrefix('Stage 4 -')),
-        deployShoot: mapStepState(byPrefix('Stage 5 -')),
-        testShoot: mapStepState(byPrefix('Stage 6 -')),
-        teardown: mapStepState(byPrefix('Stage 7 -')),
-        publish: mapStepState(byPrefix('Stage 8 -')),
-        ocm: ocmState
-      };
-    }
-
-    async function fetchLiveWorkflowRuns() {
-      try {
-        const res = await fetch(GITHUB_WORKFLOW_RUNS_API, { cache: 'no-store' });
-        if (!res.ok) return [];
-        const data = await res.json();
-        const runs = Array.isArray(data.workflow_runs) ? data.workflow_runs : [];
-        const activeOrRecent = runs.slice(0, 5);
-        const enriched = await Promise.all(activeOrRecent.map(async wRun => {
-          const isActive = wRun.status === 'in_progress' || wRun.status === 'queued' || wRun.status === 'waiting';
-          let stages = null;
-          let e2eJob = null;
-          if (isActive) {
-            try {
-              const jobsRes = await fetch(`https://api.github.com/repos/gardener/gardener-gdc-ci/actions/runs/${wRun.id}/jobs`, { cache: 'no-store' });
-              if (jobsRes.ok) {
-                const jobsData = await jobsRes.json();
-                const jobs = Array.isArray(jobsData.jobs) ? jobsData.jobs : [];
-                e2eJob = jobs.find(j => (j.name || '').includes('E2E Release Certification')) || jobs[0];
-                stages = extractStagesFromJob(e2eJob);
-              }
-            } catch (err) {
-              console.warn(`Could not fetch jobs for active run ${wRun.id}:`, err);
-            }
-          }
-          return { wRun, isActive, stages, e2eJob };
-        }));
-        return enriched;
-      } catch (e) {
-        console.warn('Could not query live GitHub Actions workflow runs:', e);
-        return [];
-      }
-    }
-
-    function renderStageBanner() {
-      const latestStagesEl = document.getElementById('latest-stages');
-      const labelEl = document.getElementById('latest-stages-label');
-      if (allRuns.length > 0) {
-        const activeRun = allRuns.find(r => r.status === 'in_progress' || r.status === 'running' || r.status === 'queued');
-        const target = activeRun || allRuns[0];
-        const dur = computeLiveDuration(target);
-        labelEl.innerHTML = activeRun
-          ? `Latest Pipeline Execution Stage Progress &mdash; <a href="${target.runUrl}" target="_blank" rel="noopener">Run #${target.runNumber}</a> (<span class="badge ${target.status}">${target.status}</span> &middot; <span data-live-duration="${target.runId}">${dur}</span>)`
-          : `Latest Pipeline Execution Stage Progress &mdash; <a href="${target.runUrl}" target="_blank" rel="noopener">Run #${target.runNumber}</a> (<span class="badge ${target.status}">${target.status}</span>)`;
-        latestStagesEl.innerHTML = STAGE_ORDER.map(([key, label]) => {
-          const st = (target.stages && target.stages[key]) || target.status || 'unknown';
-          return `<div class="stage-pill"><span>${label}</span><span class="badge ${st}">${st}</span></div>`;
-        }).join('');
-      } else {
-        labelEl.textContent = 'Latest Pipeline Execution Stage Progress';
-        latestStagesEl.innerHTML = STAGE_ORDER.map(([, label]) =>
-          `<div class="stage-pill"><span>${label}</span><span class="badge unknown">idle</span></div>`
-        ).join('');
-      }
-    }
 
     function renderTable() {
       const modeFilter = document.getElementById('mode-filter').value;
@@ -374,7 +227,6 @@
         const triggerLabel = (r.trigger === 'schedule' || !r.actor)
           ? `<code>${r.trigger || '-'}</code>`
           : `<code>${r.trigger}</code> (@${r.actor})`;
-        const dur = computeLiveDuration(r);
         return `<tr>
           <td><a href="${r.runUrl}" target="_blank" rel="noopener">#${r.runNumber}</a></td>
           <td>${r.timestamp}</td>
@@ -384,82 +236,24 @@
           <td><code>${extVer}</code> / <code>${mcmVer}</code> / <code>${ccmVer}</code> / <code>${dnsVer}</code></td>
           <td><code>${comp.extensionProviderGDC || '-'}</code> / <code>${comp.mcmProviderGDC || '-'}</code> / <code>${comp.cloudProviderGDC || '-'}</code> / <code>${comp.externalDNS || '-'}</code></td>
           <td>${stageBadges}</td>
-          <td data-live-duration="${r.runId}">${dur}</td>
+          <td>${r.duration || 'N/A'}</td>
         </tr>`;
       }).join('');
     }
 
-    function updateLiveDurationsInDOM() {
-      for (const r of allRuns) {
-        if (r.status === 'in_progress' || r.status === 'running' || r.status === 'queued' || r.status === 'waiting') {
-          const dur = computeLiveDuration(r);
-          document.querySelectorAll(`[data-live-duration="${r.runId}"]`).forEach(el => {
-            el.textContent = dur;
-          });
-        }
-      }
-    }
-
     async function loadDashboard() {
-      const [runsRes, liveRuns] = await Promise.all([
-        fetch('./data/runs.json', { cache: 'no-store' }).catch(e => {
-          console.warn('Could not load local runs.json:', e);
-          return null;
-        }),
-        fetchLiveWorkflowRuns()
-      ]);
-
       let recordedRuns = [];
-      if (runsRes && runsRes.ok) {
-        try {
-          recordedRuns = await runsRes.json();
-        } catch (e) {
-          console.warn('Could not parse runs.json:', e);
+      try {
+        const res = await fetch('./data/runs.json', { cache: 'no-store' });
+        if (res.ok) {
+          recordedRuns = await res.json();
         }
+      } catch (e) {
+        console.warn('Could not load local runs.json:', e);
       }
 
-      const byRunId = new Map();
-      for (const r of (Array.isArray(recordedRuns) ? recordedRuns : [])) {
-        if (r && r.runId) {
-          byRunId.set(String(r.runId), { ...r, runId: String(r.runId) });
-        }
-      }
-
-      let hasActiveRun = false;
-      for (const { wRun, isActive, stages, e2eJob } of liveRuns) {
-        const runId = String(wRun.id);
-        const existing = byRunId.get(runId);
-        const startedIso = (e2eJob && e2eJob.started_at) || wRun.run_started_at || wRun.created_at;
-        const startedAtMs = startedIso ? Date.parse(startedIso) : null;
-
-        if (isActive) {
-          hasActiveRun = true;
-          const defaultMode = wRun.event === 'schedule' ? 'snapshot' : 'release';
-          byRunId.set(runId, {
-            runId,
-            runNumber: String(wRun.run_number),
-            timestamp: startedIso ? startedIso.replace(/\.\d+Z$/, 'Z') : (existing && existing.timestamp) || '-',
-            trigger: wRun.event || (existing && existing.trigger) || 'manual',
-            releaseMode: (existing && existing.releaseMode) || defaultMode,
-            actor: (wRun.actor && wRun.actor.login) || (existing && existing.actor) || '',
-            status: wRun.status || 'in_progress',
-            duration: (existing && existing.duration) || 'N/A',
-            startedAtMs,
-            artifactsVersion: (existing && existing.artifactsVersion && existing.artifactsVersion !== 'unknown') ? existing.artifactsVersion : 'in progress...',
-            runUrl: wRun.html_url || (existing && existing.runUrl) || '#',
-            componentVersions: (existing && existing.componentVersions) || {},
-            components: (existing && existing.components) || {},
-            stages: stages || (existing && existing.stages) || {}
-          });
-        } else if (existing && (existing.status === 'in_progress' || existing.status === 'running' || existing.status === 'queued')) {
-          existing.status = wRun.conclusion || wRun.status || existing.status;
-          if (startedAtMs && wRun.updated_at) {
-            existing.duration = formatDurationSeconds((Date.parse(wRun.updated_at) - startedAtMs) / 1000);
-          }
-        }
-      }
-
-      allRuns = Array.from(byRunId.values())
+      allRuns = (Array.isArray(recordedRuns) ? recordedRuns : [])
+        .slice()
         .sort((a, b) => Number(b.runNumber || 0) - Number(a.runNumber || 0));
       document.getElementById('kpi-total').textContent = allRuns.length;
 
@@ -475,17 +269,31 @@
       document.getElementById('kpi-latest-snapshot').textContent =
         passedSnapshots.length ? passedSnapshots[0].artifactsVersion : 'None';
 
-      renderStageBanner();
-      renderTable();
+      const stageOrder = [
+        ['build', '1. Build (GHCR)'],
+        ['deployGarden', '3. Virtual Garden'],
+        ['deploySeed', '4. GDC Seed'],
+        ['deployShoot', '5. GDC Shoot'],
+        ['testShoot', '6. E2E & Conformance'],
+        ['teardown', '7. Teardown'],
+        ['publish', '8. Publish Artifacts'],
+        ['ocm', '9. Publish OCM Descriptor']
+      ];
 
-      if (durationTimerId) clearInterval(durationTimerId);
-      if (pollTimerId) clearInterval(pollTimerId);
-      if (hasActiveRun) {
-        durationTimerId = setInterval(updateLiveDurationsInDOM, 1000);
-        pollTimerId = setInterval(() => loadDashboard().catch(console.error), 30000);
+      const latestStagesEl = document.getElementById('latest-stages');
+      if (allRuns.length > 0) {
+        const latest = allRuns[0];
+        latestStagesEl.innerHTML = stageOrder.map(([key, label]) => {
+          const st = (latest.stages && latest.stages[key]) || latest.status || 'unknown';
+          return `<div class="stage-pill"><span>${label}</span><span class="badge ${st}">${st}</span></div>`;
+        }).join('');
       } else {
-        pollTimerId = setInterval(() => loadDashboard().catch(console.error), 60000);
+        latestStagesEl.innerHTML = stageOrder.map(([, label]) =>
+          `<div class="stage-pill"><span>${label}</span><span class="badge unknown">idle</span></div>`
+        ).join('');
       }
+
+      renderTable();
     }
 
     document.getElementById('mode-filter').addEventListener('change', renderTable);
