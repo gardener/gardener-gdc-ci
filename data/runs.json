@@ -1,5 +1,40 @@
 [
   {
+    "runId": "38617818956",
+    "runNumber": "72",
+    "timestamp": "2026-10-14T20:47:43Z",
+    "trigger": "workflow_dispatch",
+    "releaseMode": "release",
+    "actor": "dilipkumar2k6",
+    "status": "failure",
+    "duration": "2h 2m 6s",
+    "artifactsVersion": "v0.5.6",
+    "runUrl": "https://github.com/gardener/gardener-gdc-ci/actions/runs/38617818956",
+    "publicRegistry": "europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci",
+    "componentVersions": {
+      "extensionProviderGDC": "v0.5.6",
+      "mcmProviderGDC": "v0.5.7",
+      "cloudProviderGDC": "v0.5.5",
+      "externalDNS": "v0.54.0"
+    },
+    "components": {
+      "extensionProviderGDC": "85436f4",
+      "mcmProviderGDC": "eb85d84",
+      "externalDNS": "fef5c72",
+      "cloudProviderGDC": "220a3eb"
+    },
+    "stages": {
+      "build": "success",
+      "deployGarden": "success",
+      "deploySeed": "success",
+      "deployShoot": "success",
+      "testShoot": "success",
+      "teardown": "success",
+      "publish": "success",
+      "ocm": "failure"
+    }
+  },
+  {
     "runId": "38546646586",
     "runNumber": "65",
     "timestamp": "2026-10-14T11:56:48Z",
