@@ -163,6 +163,77 @@ echo "  machine-controller-manager-provider-gdc: ${MCM_PROVIDER_GDC_ARTIFACTS_VE
 echo "  cloud-provider-gdc:                      ${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION} (lastTag=${CCM_LAST_TAG:-none}, needsRelease=${CCM_NEEDS_RELEASE})"
 echo "  external-dns-management:                 ${EXTERNAL_DNS_ARTIFACTS_VERSION}"
 
+# Write release-metadata.yaml immediately so downstream stages and live dashboard updates have the resolved versions and SHAs
+cat > "${RELEASE_METADATA_FILE}" <<EOF
+releaseMode: "${RELEASE_MODE}"
+nextVersion: "${NEXT_VERSION}"
+startedAtEpoch: ${PIPELINE_START_EPOCH}
+gardenerArtifactsVersion: "${GARDENER_ARTIFACTS_VERSION}"
+extensionGDCArtifactsVersion: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
+mcmProviderGDCArtifactsVersion: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
+externalDNSArtifactsVersion: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
+cloudProviderGDCArtifactsVersion: "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
+candidateRegistry: "${GHCR_REGISTRY}"
+publicRegistry: "${PUBLIC_REGISTRY}"
+components:
+  gardenerExtensionProviderGDC:
+    repository: "${EXTENSION_GDC_REPO}"
+    ref: "${EXTENSION_GDC_REF}"
+    commitSHA: "${EXT_SHA}"
+    version: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
+    lastReleaseTag: "${EXT_LAST_TAG}"
+    needsRelease: ${EXT_NEEDS_RELEASE}
+    images:
+      - name: "gardener-extension-provider-gdch"
+        tag: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
+      - name: "gardener-extension-admission-gdch"
+        tag: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
+  machineControllerManagerProviderGDC:
+    repository: "${MCM_PROVIDER_GDC_REPO}"
+    ref: "${MCM_PROVIDER_GDC_REF}"
+    commitSHA: "${MCM_GDC_SHA}"
+    version: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
+    lastReleaseTag: "${MCM_LAST_TAG}"
+    needsRelease: ${MCM_NEEDS_RELEASE}
+    images:
+      - name: "machine-controller-manager-provider-gdch"
+        tag: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
+  externalDNSManagement:
+    repository: "${EXTERNAL_DNS_REPO}"
+    ref: "${EXTERNAL_DNS_REF}"
+    commitSHA: "${DNS_SHA}"
+    version: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
+    images:
+      - name: "external-dnsman2-gdch"
+        tag: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
+  cloudProviderGDC:
+    repository: "${CLOUD_PROVIDER_GDC_REPO}"
+    ref: "${CLOUD_PROVIDER_GDC_REF}"
+    commitSHA: "${CCM_GDC_SHA}"
+    version: "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
+    lastReleaseTag: "${CCM_LAST_TAG}"
+    needsRelease: ${CCM_NEEDS_RELEASE}
+    images:
+      - name: "cloud-controller-manager-gdch"
+        tag: "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
+EOF
+
+echo "Release metadata written to ${RELEASE_METADATA_FILE}:"
+cat "${RELEASE_METADATA_FILE}"
+
+# Publish initial in_progress entry to the dashboard so ongoing runs show resolved component versions and SHAs immediately
+DASHBOARD_SKIP_SUMMARY="true" \
+OVERALL_PIPELINE_STATUS="in_progress" \
+STAGE_BUILD_STATUS="in_progress" \
+STAGE_DEPLOY_GARDEN_STATUS="pending" \
+STAGE_DEPLOY_SEED_STATUS="pending" \
+STAGE_DEPLOY_SHOOT_STATUS="pending" \
+STAGE_TEST_SHOOT_STATUS="pending" \
+STAGE_TEARDOWN_STATUS="pending" \
+STAGE_PUBLISH_STATUS="pending" \
+STAGE_OCM_STATUS="pending" \
+"${SCRIPT_DIR}/9-update_dashboard.sh" || true
+
 # Helper to push a candidate image to GHCR
 push_candidate_image() {
   local local_image="$1"
@@ -322,61 +393,3 @@ git clone --depth 1 --branch "${GARDENLINUX_EXT_VERSION}" https://github.com/gar
 helm package "${GARDENLINUX_TEMP_DIR}/charts/gardener-extension-os-gardenlinux" --version "${GARDENLINUX_CHART_VERSION}" --destination "${TEST_CHARTS_OUT_DIR}"
 helm push "${TEST_CHARTS_OUT_DIR}/gardener-extension-os-gardenlinux-${GARDENLINUX_CHART_VERSION}.tgz" "oci://${GHCR_REGISTRY}"
 rm -rf "${GARDENLINUX_TEMP_DIR}"
-
-# 7. Write release-metadata.yaml for downstream pipeline stages and promotion
-cat > "${RELEASE_METADATA_FILE}" <<EOF
-releaseMode: "${RELEASE_MODE}"
-nextVersion: "${NEXT_VERSION}"
-startedAtEpoch: ${PIPELINE_START_EPOCH}
-gardenerArtifactsVersion: "${GARDENER_ARTIFACTS_VERSION}"
-extensionGDCArtifactsVersion: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
-mcmProviderGDCArtifactsVersion: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
-externalDNSArtifactsVersion: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
-cloudProviderGDCArtifactsVersion: "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
-candidateRegistry: "${GHCR_REGISTRY}"
-publicRegistry: "${PUBLIC_REGISTRY}"
-components:
-  gardenerExtensionProviderGDC:
-    repository: "${EXTENSION_GDC_REPO}"
-    ref: "${EXTENSION_GDC_REF}"
-    commitSHA: "${EXT_SHA}"
-    version: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
-    lastReleaseTag: "${EXT_LAST_TAG}"
-    needsRelease: ${EXT_NEEDS_RELEASE}
-    images:
-      - name: "gardener-extension-provider-gdch"
-        tag: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
-      - name: "gardener-extension-admission-gdch"
-        tag: "${EXTENSION_GDC_ARTIFACTS_VERSION}"
-  machineControllerManagerProviderGDC:
-    repository: "${MCM_PROVIDER_GDC_REPO}"
-    ref: "${MCM_PROVIDER_GDC_REF}"
-    commitSHA: "${MCM_GDC_SHA}"
-    version: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
-    lastReleaseTag: "${MCM_LAST_TAG}"
-    needsRelease: ${MCM_NEEDS_RELEASE}
-    images:
-      - name: "machine-controller-manager-provider-gdch"
-        tag: "${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}"
-  externalDNSManagement:
-    repository: "${EXTERNAL_DNS_REPO}"
-    ref: "${EXTERNAL_DNS_REF}"
-    commitSHA: "${DNS_SHA}"
-    version: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
-    images:
-      - name: "external-dnsman2-gdch"
-        tag: "${EXTERNAL_DNS_ARTIFACTS_VERSION}"
-  cloudProviderGDC:
-    repository: "${CLOUD_PROVIDER_GDC_REPO}"
-    ref: "${CLOUD_PROVIDER_GDC_REF}"
-    commitSHA: "${CCM_GDC_SHA}"
-    version: "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
-    lastReleaseTag: "${CCM_LAST_TAG}"
-    needsRelease: ${CCM_NEEDS_RELEASE}
-    images:
-      - name: "cloud-controller-manager-gdch"
-        tag: "${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"
-EOF
-
-echo "Release metadata written to ${RELEASE_METADATA_FILE}:"
-cat "${RELEASE_METADATA_FILE}"

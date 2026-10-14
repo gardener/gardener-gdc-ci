@@ -180,8 +180,8 @@ if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
   fi
 fi
 
-# Prepend the latest run, deduplicate by runId, sort by runNumber descending, and retain the most recent 100 runs
-jq --argjson entry "${NEW_ENTRY}" '[$entry] + . | unique_by(.runId) | sort_by(-((.runNumber | tonumber?) // 0)) | .[:100]' "${DASHBOARD_DATA_FILE}" > "${DASHBOARD_DATA_FILE}.tmp"
+# Prepend the latest run (replacing any prior in_progress entry for the same runId), sort by runNumber descending, and retain the most recent 100 runs
+jq --argjson entry "${NEW_ENTRY}" '[$entry] + map(select(.runId != $entry.runId)) | sort_by(-((.runNumber | tonumber?) // 0)) | .[:100]' "${DASHBOARD_DATA_FILE}" > "${DASHBOARD_DATA_FILE}.tmp"
 mv "${DASHBOARD_DATA_FILE}.tmp" "${DASHBOARD_DATA_FILE}"
 
 # Publish updated dashboard and runs.json to gh-pages branch when running on main
@@ -194,7 +194,7 @@ if [[ "${GITHUB_REF:-}" == "refs/heads/main" && -z "${PR_NUMBER:-}" && -n "${GH_
     git -C "${PAGES_WORK_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
     git -C "${PAGES_WORK_DIR}" add .
     if ! git -C "${PAGES_WORK_DIR}" diff --cached --quiet; then
-      git -C "${PAGES_WORK_DIR}" commit -m "chore(dashboard): record ${RELEASE_MODE_VAL} run #${RUN_NUMBER}" >/dev/null 2>&1
+      git -C "${PAGES_WORK_DIR}" commit -m "chore(dashboard): record ${RELEASE_MODE_VAL} run #${RUN_NUMBER} (${OVERALL_STATUS})" >/dev/null 2>&1
       git -C "${PAGES_WORK_DIR}" push origin gh-pages >/dev/null 2>&1 || true
       if command -v gh >/dev/null 2>&1; then
         GH_TOKEN="${GH_TOKEN}" gh api -X POST "repos/${GITHUB_REPOSITORY:-gardener/gardener-gdc-ci}/pages/builds" >/dev/null 2>&1 || true
@@ -204,8 +204,8 @@ if [[ "${GITHUB_REF:-}" == "refs/heads/main" && -z "${PR_NUMBER:-}" && -n "${GH_
   rm -rf "${PAGES_WORK_DIR}"
 fi
 
-# Write GitHub Actions Job Summary if running in GitHub Actions
-if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+# Write GitHub Actions Job Summary if running in GitHub Actions (final stage only)
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" && "${DASHBOARD_SKIP_SUMMARY:-false}" != "true" ]]; then
   TRIGGER_SUMMARY="\`${TRIGGER_EVENT}\` (by \`@${ACTOR}\`)"
   if [[ "${TRIGGER_EVENT}" == "schedule" ]]; then
     TRIGGER_SUMMARY="\`${TRIGGER_EVENT}\`"
@@ -248,6 +248,8 @@ EOF
 EOF
 fi
 
-complete_pr_check_run "${OVERALL_STATUS}"
+if [[ "${DASHBOARD_SKIP_SUMMARY:-false}" != "true" ]]; then
+  complete_pr_check_run "${OVERALL_STATUS}"
+fi
 
 echo "Dashboard data updated at ${DASHBOARD_DATA_FILE}."
