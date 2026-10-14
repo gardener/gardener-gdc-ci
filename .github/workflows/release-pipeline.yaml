@@ -232,6 +232,7 @@ jobs:
           RELEASE_NOTES_FILE: /tmp/gardener-gdc-release/gdc-release-notes.md
           GOSEC_REPORT_FILE: /tmp/gardener-gdc-release/artifacts/gosec-report.sarif
         run: |
+          set -euo pipefail
           # No-change official runs reuse the existing component version and descriptor.
           if [[ "${RELEASE_MODE}" == "release" && "$(yq '.components.gardenerExtensionProviderGDC.needsRelease' "${RELEASE_METADATA_FILE}")" == "false" ]]; then
             echo "publish=false" >> "${GITHUB_OUTPUT}"
@@ -253,9 +254,12 @@ jobs:
             --resources "${OCM_RESOURCES_FILE}" \
             --sources "${OCM_SOURCES_FILE}" \
             --imagevector /tmp/gardener-gdc-release/imagevector.json
-          echo "source_repository=$(jq -r '.sources[] | select(.name == \"gardener-extension-provider-gdc\") | .repository' "${CERTIFIED_RELEASE_MANIFEST}" | sed -e 's#^https://##' -e 's#\.git$##')" >> "${GITHUB_OUTPUT}"
-          echo "source_version=$(jq -r '.sources[] | select(.name == \"gardener-extension-provider-gdc\") | .version' "${CERTIFIED_RELEASE_MANIFEST}")" >> "${GITHUB_OUTPUT}"
-          echo "version=$(jq -r '.releaseVersion' "${CERTIFIED_RELEASE_MANIFEST}")" >> "${GITHUB_OUTPUT}"
+          source_repository="$(jq -r '.sources[] | select(.name == "gardener-extension-provider-gdc") | .repository' "${CERTIFIED_RELEASE_MANIFEST}" | sed -e 's#^https://##' -e 's#\.git$##')"
+          source_version="$(jq -r '.sources[] | select(.name == "gardener-extension-provider-gdc") | .version' "${CERTIFIED_RELEASE_MANIFEST}")"
+          version="$(jq -r '.releaseVersion' "${CERTIFIED_RELEASE_MANIFEST}")"
+          echo "source_repository=${source_repository}" >> "${GITHUB_OUTPUT}"
+          echo "source_version=${source_version}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
           # The aggregated GDC release notes are only produced when the extension provider
           # is actually released (release mode + code changes). When present, embed them in
           # the component descriptor and attach the descriptor to that GitHub Release.
