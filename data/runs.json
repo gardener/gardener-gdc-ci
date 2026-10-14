@@ -6,7 +6,7 @@
     "trigger": "workflow_dispatch",
     "releaseMode": "release",
     "actor": "dilipkumar2k6",
-    "status": "failure",
+    "status": "success",
     "duration": "1h 19m 24s",
     "artifactsVersion": "v0.5.7",
     "runUrl": "https://github.com/gardener/gardener-gdc-ci/actions/runs/38645357090",
@@ -31,7 +31,7 @@
       "testShoot": "success",
       "teardown": "success",
       "publish": "success",
-      "ocm": "failure"
+      "ocm": "success"
     }
   },
   {
