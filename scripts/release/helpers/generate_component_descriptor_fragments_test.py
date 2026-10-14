@@ -5,6 +5,7 @@
 
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +17,27 @@ SCRIPT = Path(__file__).with_name("generate_component_descriptor_fragments.py")
 
 
 class GenerateComponentDescriptorFragmentsTest(unittest.TestCase):
+    def test_imagevector_preserves_distinct_target_version_mappings(self):
+        generate = runpy.run_path(str(SCRIPT))["imagevector_resources"]
+        manifest = {
+            "images": [{"component": "cloud-controller-manager-gdch",
+                        "version": "v1.2.3", "image": "certified.example/ccm:v1.2.3"}],
+            "sources": [{"name": "cloud-provider-gdc",
+                         "repository": "https://github.com/GoogleCloudPlatform/cloud-provider-gdc.git"}],
+        }
+        resources = list(generate(manifest, {"images": [
+            {"name": "cloud-controller-manager", "repository": "upstream.example/ccm",
+             "sourceRepository": "github.com/GoogleCloudPlatform/cloud-provider-gdc",
+             "tag": "v0.1.0", "targetVersion": target}
+            for target in ("1.34.x", ">= 1.35")
+        ]}))
+        self.assertEqual(len(resources), 2)
+        self.assertNotEqual(resources[0]["extraIdentity"], resources[1]["extraIdentity"])
+        for resource in resources:
+            self.assertEqual(resource["access"]["imageReference"], "certified.example/ccm:v1.2.3")
+            self.assertIn({"name": "imagevector.gardener.cloud/source-repository",
+                           "value": "github.com/GoogleCloudPlatform/cloud-provider-gdc"}, resource["labels"])
+
     def test_scan_failures_and_findings_abort_release(self):
         publish_script = SCRIPT.parent.parent / "8-publish_release_artifacts.sh"
         scan_function = publish_script.read_text().split("run_gosec_sast_scan() {", 1)[1].split(
@@ -99,6 +121,29 @@ printf 'release-continues\\n'
             manifest = root / "manifest.json"
             resources = root / "resources.json"
             sources = root / "sources.json"
+            vector = root / "imagevector.json"
+            vector.write_text(json.dumps({"images": [
+                {
+                    "name": "machine-controller-manager-provider-gdch",
+                    "repository": "old.example/machine-controller-manager-provider-gdch",
+                    "tag": "v0.1.0",
+                },
+                {
+                    "name": "cloud-controller-manager",
+                    "repository": "old.example/cloud-controller-manager-gdch",
+                    "tag": "v0.1.0",
+                    "sourceRepository": "github.com/gardener/cloud-provider-gdc",
+                    "targetVersion": ">= 1.34",
+                    "labels": [{"name": "gardener.cloud/cve-categorisation",
+                                "value": {"network_exposure": "protected"}, "signing": False}],
+                },
+                {
+                    "name": "csi-driver",
+                    "repository": "private.example/csi-driver",
+                    "tag": "v2.0.0",
+                    "sourceRepository": "example.com/csi-driver",
+                },
+            ]}))
             manifest.write_text(
                 json.dumps(
                     {
@@ -157,6 +202,8 @@ printf 'release-continues\\n'
                     str(resources),
                     "--sources",
                     str(sources),
+                    "--imagevector",
+                    str(vector),
                 ],
                 check=True,
             )
@@ -167,6 +214,12 @@ printf 'release-continues\\n'
             self.assertEqual(generated_resources[1]["relation"], "external")
             self.assertEqual(generated_resources[3]["type"], "helmChart")
             self.assertEqual(generated_resources[3]["version"], "1.2.3")
+            ccm = generated_resources[2]
+            self.assertEqual(ccm["access"]["imageReference"], "registry.example/ccm:v1.2.3")
+            self.assertIn({"name": "imagevector.gardener.cloud/target-version", "value": ">= 1.34"}, ccm["labels"])
+            self.assertIn({"name": "gardener.cloud/cve-categorisation",
+                           "value": {"network_exposure": "protected"}, "signing": False}, ccm["labels"])
+            self.assertNotIn("csi-driver", [resource["name"] for resource in generated_resources])
             image_vector_names = {
                 resource["name"]: label["value"]
                 for resource in generated_resources
@@ -203,7 +256,11 @@ printf 'release-continues\\n'
                     {"name": "dependency-source", "labels": []},
                 ]))
                 descriptor.write_text(json.dumps({"component": {
-                    "sources": [{"name": "ci-source"}],
+                    "sources": [{"name": "main-source", "labels": [
+                        {"name": "example.com/custom", "value": "preserved"},
+                        {"name": "cloud.gardener.cnudie/dso/scanning-hints/source_analysis/v1",
+                         "value": {"policy": "skip"}},
+                    ]}],
                     "resources": [{"name": "gosec-report"}] if has_report else [],
                 }}))
                 subprocess.run([
@@ -217,10 +274,13 @@ printf 'release-continues\\n'
                     "main-source", "dependency-source",
                 ])
                 self.assertEqual(finalized[1]["labels"], [])
+                self.assertIn({"name": "example.com/custom", "value": "preserved"}, finalized[0]["labels"])
+                scan_labels = [label for label in finalized[0]["labels"]
+                               if label["name"] == "cloud.gardener.cnudie/dso/scanning-hints/source_analysis/v1"]
                 if has_report:
-                    self.assertEqual(finalized[0]["labels"][0]["value"]["policy"], "skip")
+                    self.assertEqual(scan_labels[0]["value"]["policy"], "skip")
                 else:
-                    self.assertEqual(finalized[0]["labels"], [])
+                    self.assertEqual(scan_labels, [])
 
 
 if __name__ == "__main__":

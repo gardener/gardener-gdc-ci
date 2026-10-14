@@ -228,6 +228,7 @@ jobs:
           CERTIFIED_RELEASE_MANIFEST: /tmp/gardener-gdc-release/artifacts/certified-release-manifest.json
           OCM_RESOURCES_FILE: /tmp/gardener-gdc-release/ocm-resources.json
           OCM_SOURCES_FILE: /tmp/gardener-gdc-release/ocm-sources.json
+          EXTENSION_SOURCE_DIR: /tmp/gardener-gdc-release/src/gardener-extension-provider-gdc
           RELEASE_NOTES_FILE: /tmp/gardener-gdc-release/gdc-release-notes.md
           GOSEC_REPORT_FILE: /tmp/gardener-gdc-release/artifacts/gosec-report.sarif
         run: |
@@ -237,10 +238,21 @@ jobs:
             exit 0
           fi
           echo "publish=true" >> "${GITHUB_OUTPUT}"
+          # Stage 1 retains the tested checkout; never fetch metadata from a moving branch.
+          expected_commit="$(jq -r '.sources[] | select(.name == "gardener-extension-provider-gdc") | .commitSHA' "${CERTIFIED_RELEASE_MANIFEST}")"
+          test "$(git -C "${EXTENSION_SOURCE_DIR}" rev-parse HEAD)" = "$(git -C "${EXTENSION_SOURCE_DIR}" rev-parse "${expected_commit}^{commit}")"
+          yq -o=json '.' "${EXTENSION_SOURCE_DIR}/imagevector/images.yaml" > /tmp/gardener-gdc-release/imagevector.json
+          base_component="${EXTENSION_SOURCE_DIR}/.ocm/base-component.yaml"
+          if [[ ! -f "${base_component}" ]]; then
+            echo "::error::The tested extension checkout must contain .ocm/base-component.yaml."
+            exit 1
+          fi
+          echo "base_component=${base_component}" >> "${GITHUB_OUTPUT}"
           python3 ./scripts/release/helpers/generate_component_descriptor_fragments.py \
             --manifest "${CERTIFIED_RELEASE_MANIFEST}" \
             --resources "${OCM_RESOURCES_FILE}" \
-            --sources "${OCM_SOURCES_FILE}"
+            --sources "${OCM_SOURCES_FILE}" \
+            --imagevector /tmp/gardener-gdc-release/imagevector.json
           echo "source_repository=$(jq -r '.sources[] | select(.name == \"gardener-extension-provider-gdc\") | .repository' "${CERTIFIED_RELEASE_MANIFEST}" | sed -e 's#^https://##' -e 's#\.git$##')" >> "${GITHUB_OUTPUT}"
           echo "source_version=$(jq -r '.sources[] | select(.name == \"gardener-extension-provider-gdc\") | .version' "${CERTIFIED_RELEASE_MANIFEST}")" >> "${GITHUB_OUTPUT}"
           echo "version=$(jq -r '.releaseVersion' "${CERTIFIED_RELEASE_MANIFEST}")" >> "${GITHUB_OUTPUT}"
@@ -265,6 +277,7 @@ jobs:
         if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.publish == 'true'
         uses: gardener/cc-utils/.github/actions/base-component-descriptor@v1
         with:
+          base-component: ${{ steps.ocm_inputs.outputs.base_component }}
           version: ${{ steps.ocm_inputs.outputs.version }}
           ocm-repository: ${{ steps.gardener_params.outputs.ocm-repository }}
 

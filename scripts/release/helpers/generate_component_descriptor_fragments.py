@@ -24,10 +24,9 @@ DEPENDENCY_IMAGE_NAMES = {
     "machine-controller-manager-provider-gdch",
     "cloud-controller-manager-gdch",
 }
-COMPONENT_IMAGE_NAMES = LOCAL_IMAGE_NAMES | DEPENDENCY_IMAGE_NAMES
-IMAGE_VECTOR_NAMES = {
-    "machine-controller-manager-provider-gdch": "machine-controller-manager-provider-gdch",
-    "cloud-controller-manager-gdch": "cloud-controller-manager",
+DEPENDENCY_SOURCE_IMAGES = {
+    "machine-controller-manager-provider-gdc": "machine-controller-manager-provider-gdch",
+    "cloud-provider-gdc": "cloud-controller-manager-gdch",
 }
 COMPONENT_SOURCE_NAMES = {
     "gardener-extension-provider-gdc",
@@ -63,11 +62,6 @@ def image_resource(image: Dict[str, str]) -> Dict[str, Any]:
     name = image["component"]
     version = image["version"]
     labels = resource_labels()
-    if name in IMAGE_VECTOR_NAMES:
-        labels.append({
-            "name": "imagevector.gardener.cloud/name",
-            "value": IMAGE_VECTOR_NAMES[name],
-        })
     return {
         "name": name,
         "version": version,
@@ -100,19 +94,70 @@ def chart_resource(chart_ref: str) -> Dict[str, Any]:
     }
 
 
+def imagevector_resources(manifest: Dict[str, Any], vector: Dict[str, Any]):
+    certified_images = {
+        image["component"]: image for image in manifest["images"]
+        if image["component"] in DEPENDENCY_IMAGE_NAMES
+    }
+    source_images = {
+        source["repository"].removeprefix("https://").removesuffix(".git"): certified_images[name]
+        for source in manifest["sources"]
+        if (name := DEPENDENCY_SOURCE_IMAGES.get(source["name"])) in certified_images
+    }
+    matched_dependencies = set()
+    for entry in vector["images"]:
+        certified = source_images.get(entry.get("sourceRepository"))
+        if certified is None:
+            certified = certified_images.get(entry["repository"].rsplit("/", 1)[-1])
+        # Only export the publicly accessible dependencies certified by this pipeline.
+        # CSI images currently point to inaccessible registries and must stay out of OCM.
+        if certified is None:
+            continue
+        resource = image_resource(certified)
+        matched_dependencies.add(certified["component"])
+        labels = {label["name"]: label for label in entry.get("labels", [])}
+        purposes = labels.get("gardener.cloud/purposes", CERTIFICATION_LABEL)
+        labels["gardener.cloud/purposes"] = {
+            **purposes,
+            "value": list(dict.fromkeys(purposes["value"] + CERTIFICATION_LABEL["value"])),
+        }
+        for suffix, value in (
+            ("name", entry["name"]),
+            ("repository", resource["access"]["imageReference"].rsplit(":", 1)[0]),
+            ("source-repository", entry.get("sourceRepository")),
+            ("target-version", entry.get("targetVersion")),
+        ):
+            if value is not None:
+                key = f"imagevector.gardener.cloud/{suffix}"
+                labels[key] = {"name": key, "value": value}
+        resource["labels"] = list(labels.values())
+        resource["extraIdentity"].update(entry.get("extraIdentity", {}))
+        if "targetVersion" in entry:
+            resource["extraIdentity"]["targetversion"] = entry["targetVersion"]
+        yield resource
+    missing = certified_images.keys() - matched_dependencies
+    if missing:
+        raise SystemExit(f"extension imagevector is missing certified dependencies: {sorted(missing)}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--resources", type=Path, required=True)
     parser.add_argument("--sources", type=Path, required=True)
+    parser.add_argument("--imagevector", type=Path, required=True,
+                        help="extension imagevector converted to JSON")
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     resources = [
         image_resource(image)
         for image in manifest.get("images", [])
-        if image["component"] in COMPONENT_IMAGE_NAMES
+        if image["component"] in LOCAL_IMAGE_NAMES
     ]
+    resources.extend(imagevector_resources(
+        manifest, json.loads(args.imagevector.read_text(encoding="utf-8")),
+    ))
     resources.extend(chart_resource(chart) for chart in manifest.get("charts", []))
     if not resources:
         raise SystemExit("certified release manifest contains no resources")
