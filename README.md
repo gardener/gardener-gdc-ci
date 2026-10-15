@@ -83,6 +83,7 @@ gh workflow run release-pipeline.yaml \
 
 - **Release Pipeline Dashboard ([`https://gardener.github.io/gardener-gdc-ci/`](https://gardener.github.io/gardener-gdc-ci/))**: Displays pass rates, latest certified versions, stage-by-stage status badges, component commit SHAs, and historical run results.
 - **GitHub Actions Job Summary**: Every workflow run publishes a summary table under the run's **Summary** tab with stage outcomes, component SHAs, artifact versions, and target registries.
+- **Local Release Pipeline CLI ([`release-pipeline/README.md`](./release-pipeline/README.md))**: Provides `./release-pipeline/cli.sh` for inspecting active release test jobs and cluster pool availability, refreshing kubeconfigs into `/tmp/kubeconfigs/`, and manually tearing down active test environments.
 
 ---
 
@@ -110,4 +111,15 @@ Artifact versions are derived from the root `VERSION` file in each component rep
 | `admission-gdch-application-helm` | Helm Chart | `gardener/gardener-extension-provider-gdc` | `${VERSION#v}-<ext_sha>` (e.g. `0.5.3-dev-8e432a2`) | `${RELEASE_VER#v}` (e.g. `0.5.3`) |
 | `admission-gdch-runtime-helm` | Helm Chart | `gardener/gardener-extension-provider-gdc` | `${VERSION#v}-<ext_sha>` (e.g. `0.5.3-dev-8e432a2`) | `${RELEASE_VER#v}` (e.g. `0.5.3`) |
 
-After successful public promotion, the pipeline also publishes the certified extension as the OCM component `github.com/gardener/gardener-extension-provider-gdc:<release-version>`. The provider and admission images/charts are local resources. MCM and CCM metadata (`sourceRepository`, labels, and `targetVersion`) comes from `imagevector/images.yaml` in the tested extension checkout, with image references and versions replaced by the certified artifacts. CSI images are excluded because their registries are currently inaccessible. The tested extension must contain `.ocm/base-component.yaml`, which supplies the component metadata. The descriptor records the tested extension, MCM, and CCM source commits. The external-dns artifact is used by the certification pipeline but is not part of this component vector. Official release descriptors are preserved on subsequent no-change runs. New descriptors are retained as the `gdc-component-descriptor` workflow artifact. On official extension releases, gosec runs as a blocking gate before the extension release images are built and its report is attached to the component descriptor. The main-source SAST skip label is included only when that report is attached, even if the extension's base definition declares it unconditionally.
+### OCM Component Descriptor & Security Attestations
+
+After successful public promotion, the pipeline publishes the certified extension as the OCM component `github.com/gardener/gardener-extension-provider-gdc:<release-version>`:
+
+- **Base Definition & Source Commits**: The tested extension checkout must contain `.ocm/base-component.yaml`, which supplies the base component metadata. The published descriptor records the tested extension, MCM, and CCM source commits.
+- **Component Resources & Image Vector**:
+  - The provider and admission container images and Helm charts are included as local OCM resources.
+  - MCM and CCM metadata (`sourceRepository`, labels, and `targetVersion`) is derived from `imagevector/images.yaml` in the tested extension checkout, with image references and versions replaced by the certified artifacts.
+  - CSI images are excluded because their registries are currently inaccessible.
+  - The `external-dns` artifact is used during certification testing but is not part of the extension component vector.
+- **SAST (`gosec`) Verification**: On official extension releases, `gosec` runs as a blocking gate before the extension release images are built, and its report is attached to the component descriptor. The main-source SAST skip label is included only when that report is attached, even if the extension's base definition declares it unconditionally.
+- **Retention & Immutability**: Official release descriptors are preserved on subsequent no-change runs. Newly generated descriptors are also uploaded as the `gdc-component-descriptor` workflow artifact.
