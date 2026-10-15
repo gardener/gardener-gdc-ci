@@ -1142,4 +1142,5 @@ func cleanupStaleLoadBalancerTestResources(ctx context.Context, t *testing.T, sh
 	// Leaf subnets must be completely deleted before their parent branch subnets can be deleted.
 	deleteSubnetsBySuffix(leafSubnetSuffix)
 	deleteSubnetsBySuffix(branchSubnetSuffix)
+	subnet.CleanupOrphanedServiceSubnets(ctx, globalClient, project)
 }

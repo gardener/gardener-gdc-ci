@@ -133,6 +133,10 @@ func TestCleanupResources(t *testing.T) {
 		}
 		t.Logf("Seed cluster '%s' deleted successfully.", seedKey)
 
+		if releasePipelineCfg.GlobalAPIClient != nil && releasePipelineCfg.GDC != nil {
+			subnet.CleanupOrphanedServiceSubnets(ctx, releasePipelineCfg.GlobalAPIClient, releasePipelineCfg.GDC.Project)
+		}
+
 		assertAndCleanupSeedBucket(ctx, t, releasePipelineCfg)
 
 		// Uninstall gardenlet helm chart on the remote Shoot cluster hosting the Seed cluster

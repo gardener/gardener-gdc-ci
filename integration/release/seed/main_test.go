@@ -48,6 +48,7 @@ import (
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/gardener"
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/helm"
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/kubernetes"
+	"github.com/gardener/gardener-gdc-ci/integration/pkg/subnet"
 )
 
 var (
@@ -161,6 +162,10 @@ func TestCreateSeedCluster(t *testing.T) {
 	}
 	if err := deployExtensionProvider(ctx, gardenClient, releaseConfig.CandidateRegistryURL(), releaseConfigData.Gardener); err != nil {
 		t.Fatalf("failed to deploy gdch extension provider: %v", err)
+	}
+
+	if releaseConfigData.GlobalAPIClient != nil {
+		subnet.CleanupOrphanedServiceSubnets(ctx, releaseConfigData.GlobalAPIClient, releaseConfigData.GDC.Project)
 	}
 
 	t.Log("Deploying Gardenlet")

@@ -17,6 +17,8 @@ package subnet
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,13 +31,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	ipamglobalv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/global/ipam/v1"
+	globalnetworkingv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/global/networking/v1"
 	ipamv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/ipam/v1"
 
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/diagnostics"
 )
 
 const (
-	pollInterval = 2 * time.Second
+	pollInterval                        = 2 * time.Second
+	forwardingRuleExternalAnnotationKey = "networking.private.gdc.goog/forwarding-rule-external"
+	forwardingRuleInternalAnnotationKey = "networking.private.gdc.goog/forwarding-rule-internal"
 )
 
 // SubnetOptions defines the options for EnsureSubnet.
@@ -181,4 +186,94 @@ func DeleteSubnet(ctx context.Context, c client.Client, key client.ObjectKey, ti
 		return fmt.Errorf("subnet %s not deleted (timeout):\n%s\nerror: %w", key.Name, subnetYAML, err)
 	}
 	return nil
+}
+
+// CleanupOrphanedServiceSubnets deletes orphaned g-svc-* LoadBalancer Subnets in the given project
+// namespace whose owning ForwardingRuleExternal or ForwardingRuleInternal no longer exists and whose
+// ConsumerRef has been cleared. On GDC Global API clusters, ownerReferences garbage collection does
+// not automatically delete g-svc-* Subnets after their ForwardingRule is deleted, which can exhaust
+// the /32 IP pool in platform/data-network-segment-anycast-group (IPAM0012).
+func CleanupOrphanedServiceSubnets(ctx context.Context, c client.Client, namespace string) {
+	if c == nil || namespace == "" {
+		return
+	}
+
+	var extFRList globalnetworkingv1.ForwardingRuleExternalList
+	if err := c.List(ctx, &extFRList, client.InNamespace(namespace)); err != nil {
+		log.Printf("Warning: failed to list ForwardingRuleExternals in %s during orphaned subnet cleanup: %v", namespace, err)
+		return
+	}
+	activeExtFRs := make(map[string]struct{}, len(extFRList.Items))
+	for i := range extFRList.Items {
+		activeExtFRs[extFRList.Items[i].Name] = struct{}{}
+	}
+
+	var intFRList globalnetworkingv1.ForwardingRuleInternalList
+	if err := c.List(ctx, &intFRList, client.InNamespace(namespace)); err != nil {
+		log.Printf("Warning: failed to list ForwardingRuleInternals in %s during orphaned subnet cleanup: %v", namespace, err)
+		return
+	}
+	activeIntFRs := make(map[string]struct{}, len(intFRList.Items))
+	for i := range intFRList.Items {
+		activeIntFRs[intFRList.Items[i].Name] = struct{}{}
+	}
+
+	var subnetList ipamglobalv1.SubnetList
+	if err := c.List(ctx, &subnetList, client.InNamespace(namespace)); err != nil {
+		log.Printf("Warning: failed to list Subnets in %s during orphaned subnet cleanup: %v", namespace, err)
+		return
+	}
+
+	deletedCount := 0
+	for i := range subnetList.Items {
+		s := &subnetList.Items[i]
+		if !s.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if s.Status.ConsumerRef != nil || len(s.Status.ChildrenRefs) > 0 {
+			continue
+		}
+		isTestLBSubnet := strings.HasPrefix(s.Name, "elb-test-") || strings.HasPrefix(s.Name, "ilb-test-")
+		if !isTestLBSubnet && !strings.HasPrefix(s.Name, "g-svc-") {
+			continue
+		}
+
+		if isTestLBSubnet || isOrphanedForwardingRuleSubnet(s, activeExtFRs, activeIntFRs) {
+			if err := c.Delete(ctx, s); client.IgnoreNotFound(err) != nil {
+				log.Printf("Warning: failed to delete orphaned LB subnet %s/%s: %v", namespace, s.Name, err)
+			} else {
+				deletedCount++
+			}
+		}
+	}
+
+	if deletedCount > 0 {
+		log.Printf("Cleaned up %d orphaned LoadBalancer subnet(s) in namespace %s", deletedCount, namespace)
+	}
+}
+
+func isOrphanedForwardingRuleSubnet(s *ipamglobalv1.Subnet, activeExtFRs, activeIntFRs map[string]struct{}) bool {
+	if s.Annotations != nil {
+		if extFR := s.Annotations[forwardingRuleExternalAnnotationKey]; extFR != "" {
+			_, exists := activeExtFRs[extFR]
+			return !exists
+		}
+		if intFR := s.Annotations[forwardingRuleInternalAnnotationKey]; intFR != "" {
+			_, exists := activeIntFRs[intFR]
+			return !exists
+		}
+	}
+
+	for _, owner := range s.OwnerReferences {
+		switch owner.Kind {
+		case "ForwardingRuleExternal":
+			_, exists := activeExtFRs[owner.Name]
+			return !exists
+		case "ForwardingRuleInternal":
+			_, exists := activeIntFRs[owner.Name]
+			return !exists
+		}
+	}
+
+	return false
 }
