@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,7 @@ const (
 	etcdEventsPVCNameFormat             = "etcd-events-etcd-events-%d"
 	cdiUsePopulatorAnnotationKey        = "cdi.kubevirt.io/storage.usePopulator"
 	cdiBindImmediateRequestedAnnotation = "cdi.kubevirt.io/storage.bind.immediate.requested"
+	selectedNodeAnnotationKey           = "volume.kubernetes.io/selected-node"
 	// subnetPrefixLength is set to /27 (32 IPs).
 	// Rationale for /27:
 	// 1. Capacity: A /27 subnet provides 32 IPs, which splitCIDR divides into /28 (16 IPs)
@@ -250,10 +252,13 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 				}
 			}
 
-			// Pre-create the 6 etcd StatefulSet PVCs with CDI immediate-bind annotations before etcd-druid creates
-			// the StatefulSets so CreateVolume passes both annotations on the initial DataVolume creation.
+			// Pre-create the 6 etcd StatefulSet PVCs with CDI immediate-bind annotations and spread
+			// volume.kubernetes.io/selected-node across Ready Seed nodes before etcd-druid creates
+			// the StatefulSets so CreateVolume + pvc_reconciler bind the volumes immediately instead of
+			// colliding with all 6 ControllerPublishVolume calls when the Etcd pods are scheduled.
 			if !etcdPVCsPrecreated {
 				fsMode := corev1.PersistentVolumeFilesystem
+				readyNodes := listReadySeedNodeNames(ctx, seedClient)
 				precreateSpecs := []struct {
 					nameFormat  string
 					partOf      string
@@ -266,14 +271,18 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 				for _, spec := range precreateSpecs {
 					for ordinal := 0; ordinal < 3; ordinal++ {
 						pvcName := fmt.Sprintf(spec.nameFormat, ordinal)
+						annotations := map[string]string{
+							cdiUsePopulatorAnnotationKey:        "false",
+							cdiBindImmediateRequestedAnnotation: "true",
+						}
+						if len(readyNodes) > 0 {
+							annotations[selectedNodeAnnotationKey] = readyNodes[ordinal%len(readyNodes)]
+						}
 						pvc := &corev1.PersistentVolumeClaim{
 							ObjectMeta: metav1.ObjectMeta{
-								Name:      pvcName,
-								Namespace: shootNamespace,
-								Annotations: map[string]string{
-									cdiUsePopulatorAnnotationKey:        "false",
-									cdiBindImmediateRequestedAnnotation: "true",
-								},
+								Name:        pvcName,
+								Namespace:   shootNamespace,
+								Annotations: annotations,
 								Labels: map[string]string{
 									"app.kubernetes.io/managed-by": "etcd-druid",
 									"app.kubernetes.io/part-of":    spec.partOf,
@@ -319,6 +328,27 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 			}
 		}
 	}
+}
+
+func listReadySeedNodeNames(ctx context.Context, c client.Client) []string {
+	nodeList := &corev1.NodeList{}
+	if err := c.List(ctx, nodeList); err != nil {
+		return nil
+	}
+	var names []string
+	for _, n := range nodeList.Items {
+		if n.Spec.Unschedulable {
+			continue
+		}
+		for _, cond := range n.Status.Conditions {
+			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+				names = append(names, n.Name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func createCloudprofile(ctx context.Context, gardenClient client.WithWatch, cfg *config.ReleaseTestConfig, t *testing.T) {
