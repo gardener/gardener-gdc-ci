@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"testing"
 
@@ -76,6 +77,7 @@ const (
 	gardenerIgnoreAnnotationKey         = "resources.gardener.cloud/ignore"
 	cdiUsePopulatorAnnotationKey        = "cdi.kubevirt.io/storage.usePopulator"
 	cdiBindImmediateRequestedAnnotation = "cdi.kubevirt.io/storage.bind.immediate.requested"
+	selectedNodeAnnotationKey           = "volume.kubernetes.io/selected-node"
 )
 
 type seedTemplateData struct {
@@ -646,8 +648,9 @@ func ensureSeedGardenPrometheusPVCs(ctx context.Context, releaseConfigData *conf
 	_ = targetClient.Create(ctx, gardenNS)
 
 	fsMode := corev1.PersistentVolumeFilesystem
+	readyNodes := listReadySeedNodeNames(ctx, targetClient)
 	instances := []string{"aggregate", "cache", "seed"}
-	for _, instance := range instances {
+	for idx, instance := range instances {
 		pvcName := fmt.Sprintf(prometheusPVCNameFormat, instance)
 		pvcKey := client.ObjectKey{Name: pvcName, Namespace: gardenNamespace}
 		existing := &corev1.PersistentVolumeClaim{}
@@ -674,14 +677,18 @@ func ensureSeedGardenPrometheusPVCs(ctx context.Context, releaseConfigData *conf
 		}
 		if errors.IsNotFound(err) {
 			log.Printf("Pre-creating annotated Seed Prometheus PVC %s/%s...", gardenNamespace, pvcName)
+			annotations := map[string]string{
+				cdiUsePopulatorAnnotationKey:        "false",
+				cdiBindImmediateRequestedAnnotation: "true",
+			}
+			if len(readyNodes) > 0 {
+				annotations[selectedNodeAnnotationKey] = readyNodes[idx%len(readyNodes)]
+			}
 			pvc := &corev1.PersistentVolumeClaim{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      pvcName,
-					Namespace: gardenNamespace,
-					Annotations: map[string]string{
-						cdiUsePopulatorAnnotationKey:        "false",
-						cdiBindImmediateRequestedAnnotation: "true",
-					},
+					Name:        pvcName,
+					Namespace:   gardenNamespace,
+					Annotations: annotations,
 					Labels: map[string]string{
 						"app.kubernetes.io/instance":   instance,
 						"app.kubernetes.io/managed-by": "prometheus-operator",
@@ -726,6 +733,27 @@ func ensureSeedGardenPrometheusPVCs(ctx context.Context, releaseConfigData *conf
 	} else {
 		log.Printf("All 3 Seed Prometheus PVCs in %s are Bound.", gardenNamespace)
 	}
+}
+
+func listReadySeedNodeNames(ctx context.Context, c client.Client) []string {
+	nodeList := &corev1.NodeList{}
+	if err := c.List(ctx, nodeList); err != nil {
+		return nil
+	}
+	var names []string
+	for _, n := range nodeList.Items {
+		if n.Spec.Unschedulable {
+			continue
+		}
+		for _, cond := range n.Status.Conditions {
+			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+				names = append(names, n.Name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // suppressRemoteShootTargetVPA disables the host Shoot's target VPA bindings on a Shooted Seed.
