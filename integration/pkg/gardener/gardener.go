@@ -196,6 +196,23 @@ func NewGardenClient(gardenKubeconfigPath string) (client.WithWatch, error) {
 	return clients.WatchClient, nil
 }
 
+func retryWithBackoff(ctx context.Context, attempts int, delay time.Duration, fn func() error) error {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if err := fn(); err != nil {
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("%w: last error: %v", ctx.Err(), lastErr)
+			case <-time.After(delay):
+				continue
+			}
+		}
+		return nil
+	}
+	return lastErr
+}
+
 // deployExtension is a helper function that deploys a Gardener extension with the given configuration
 func DeployExtension(ctx context.Context, gardenClient client.WithWatch, config *ExtensionConfig) error {
 	valuesBytes, err := json.Marshal(config.Values)
@@ -204,13 +221,12 @@ func DeployExtension(ctx context.Context, gardenClient client.WithWatch, config 
 	}
 
 	// Create or Update ControllerDeployment
-	controllerDeployment := &gardencorev1.ControllerDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: config.Name,
-		},
-	}
-
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retryWithBackoff(ctx, 12, 5*time.Second, func() error {
+		controllerDeployment := &gardencorev1.ControllerDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: config.Name,
+			},
+		}
 		_, updateErr := controllerutil.CreateOrUpdate(ctx, gardenClient, controllerDeployment, func() error {
 			controllerDeployment.Helm = &gardencorev1.HelmControllerDeployment{
 				OCIRepository: &gardencorev1.OCIRepository{
@@ -231,13 +247,12 @@ func DeployExtension(ctx context.Context, gardenClient client.WithWatch, config 
 	}
 
 	// Create or Update ControllerRegistration
-	controllerRegistration := &gardencorev1beta1.ControllerRegistration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: config.Name,
-		},
-	}
-
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retryWithBackoff(ctx, 12, 5*time.Second, func() error {
+		controllerRegistration := &gardencorev1beta1.ControllerRegistration{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: config.Name,
+			},
+		}
 		_, updateErr := controllerutil.CreateOrUpdate(ctx, gardenClient, controllerRegistration, func() error {
 			controllerRegistration.Spec = gardencorev1beta1.ControllerRegistrationSpec{
 				Deployment: &gardencorev1beta1.ControllerRegistrationDeployment{
@@ -277,13 +292,13 @@ func DeployOperatorExtension(ctx context.Context, runtimeClusterClient client.Wi
 		return fmt.Errorf("failed to marshal extension provider runtime values for %s extension: %v", config.Name, err)
 	}
 
-	extopDeployment := &operatorv1alpha1.Extension{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: config.Name,
-		},
-	}
-	// Retry on optimistic concurrency conflicts (409) when gardener-operator concurrently updates Extension status/finalizers.
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	// Retry on optimistic concurrency conflicts (409) and transient webhook readiness errors.
+	err = retryWithBackoff(ctx, 12, 5*time.Second, func() error {
+		extopDeployment := &operatorv1alpha1.Extension{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: config.Name,
+			},
+		}
 		_, updateErr := controllerutil.CreateOrUpdate(ctx, runtimeClusterClient, extopDeployment, func() error {
 			extopDeployment.Spec = operatorv1alpha1.ExtensionSpec{
 				Deployment: &operatorv1alpha1.Deployment{

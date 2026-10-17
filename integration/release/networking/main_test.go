@@ -84,6 +84,11 @@ func TestClusterNetworking(t *testing.T) {
 		kubernetes.CleanupResources(t, watchClient, namespace)
 	})
 
+	testImage := releaseConfig.TestImageName
+	if *virtualGardenProvider == "gdc" && releasePipelineCfg.GDC != nil {
+		testImage = releaseConfig.GetTestImage(releasePipelineCfg.GDC.HarborRegistryURL)
+	}
+
 	podSpec := func(name string) *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -92,7 +97,7 @@ func TestClusterNetworking(t *testing.T) {
 			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Name: "test", Image: releaseConfig.TestImageName, Command: []string{"sleep", "3600"}},
+					{Name: "test", Image: testImage, Command: []string{"sleep", "3600"}},
 				},
 				RestartPolicy: corev1.RestartPolicyNever,
 			},
