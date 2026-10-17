@@ -175,9 +175,14 @@ func TestLoadBalancerServiceLifecycle(t *testing.T) {
 	testerPodName := "lb-tester-pod"
 	appLabel := map[string]string{"app": backendPodName}
 
-	backendPodSpec := podSpec(client.ObjectKey{Name: backendPodName, Namespace: namespace}, releaseConfig.TestImageName)
+	testImage := releasePipelineCfg.Gardener.TestImage
+	if testImage == "" {
+		t.Fatal("gardener.testImage must be specified in release configuration")
+	}
+
+	backendPodSpec := podSpec(client.ObjectKey{Name: backendPodName, Namespace: namespace}, testImage)
 	backendPodSpec.Labels = appLabel
-	testerPodSpec := podSpec(client.ObjectKey{Name: testerPodName, Namespace: namespace}, releaseConfig.TestImageName)
+	testerPodSpec := podSpec(client.ObjectKey{Name: testerPodName, Namespace: namespace}, testImage)
 
 	t.Logf("Creating backend pod %s in %s namespace", backendPodName, namespace)
 	_, err = kubernetes.EnsurePod(ctx, watchClient, backendPodSpec, waitForPodReadyTimeout)

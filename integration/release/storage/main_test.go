@@ -31,7 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/config/loader"
-	releaseConfig "github.com/gardener/gardener-gdc-ci/integration/pkg/config/release"
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/gardener"
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/kubernetes"
 )
@@ -101,6 +100,11 @@ func TestClusterStorageLifecycle(t *testing.T) {
 	testFileContent := "persistence-is-working-" + suffix
 	testFilePath := fmt.Sprintf("%s/%s", mountPath, testFileName)
 
+	testImage := releasePipelineCfg.Gardener.TestImage
+	if testImage == "" {
+		t.Fatal("gardener.testImage must be specified in release configuration")
+	}
+
 	statefulSet := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      statefulSetName,
@@ -116,8 +120,9 @@ func TestClusterStorageLifecycle(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": statefulSetName}},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name:  "nginx",
-						Image: releaseConfig.TestImageName,
+						Name:    "nginx",
+						Image:   testImage,
+						Command: []string{"sleep", "3600"},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "web",
 							MountPath: mountPath,

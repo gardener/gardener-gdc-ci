@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/config/loader"
-	releaseConfig "github.com/gardener/gardener-gdc-ci/integration/pkg/config/release"
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/gardener"
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/kubernetes"
 )
@@ -84,6 +83,11 @@ func TestClusterNetworking(t *testing.T) {
 		kubernetes.CleanupResources(t, watchClient, namespace)
 	})
 
+	testImage := releasePipelineCfg.Gardener.TestImage
+	if testImage == "" {
+		t.Fatal("gardener.testImage must be specified in release configuration")
+	}
+
 	podSpec := func(name string) *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -92,7 +96,7 @@ func TestClusterNetworking(t *testing.T) {
 			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Name: "test", Image: releaseConfig.TestImageName, Command: []string{"sleep", "3600"}},
+					{Name: "test", Image: testImage, Command: []string{"sleep", "3600"}},
 				},
 				RestartPolicy: corev1.RestartPolicyNever,
 			},

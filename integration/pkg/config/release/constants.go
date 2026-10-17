@@ -33,9 +33,6 @@ const (
 	// so teardown retries can still identify and verify deletion of the GDC Bucket after the Seed CR is gone.
 	SeedBucketNameAnnotation = "integration.release.sapbtp.gardener/seed-bucket-name"
 
-	// TestImageName is the name of the container image used in Shoot Cluster tests.
-	TestImageName = "nginx:alpine"
-
 	// CloudControllerManagerImageName is the name of the cloud controller manager image.
 	CloudControllerManagerImageName = "cloud-controller-manager-gdch"
 

@@ -190,6 +190,9 @@ type GardenerConfig struct {
 	// KubernetesVersion is the kubernetes version to use for seed and shoots clusters.
 	KubernetesVersion string `yaml:"kubernetesVersion"`
 
+	// TestImage is the full container image path used in Shoot cluster tests (e.g. "docker.io/library/nginx:alpine").
+	TestImage string `yaml:"testImage"`
+
 	// CiliumExtension is the configuration for the Cilium extension.
 	CiliumExtension *ExtensionConfig `yaml:"ciliumExtension"`
 

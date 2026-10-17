@@ -52,6 +52,7 @@ gdc:
 gardener:
   gardenerVersion: v1.149.3
   kubernetesVersion: 1.35.0
+  testImage: docker.io/library/nginx:alpine
   ciliumExtension:
     helmChartRef: ghcr.io/gardener/gardener-gdc-ci/gardener-extension-networking-cilium:0.1.0
     version: v1.36.0
