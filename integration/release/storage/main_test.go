@@ -248,14 +248,44 @@ func TestClusterStorageLifecycle(t *testing.T) {
 		}
 
 		t.Log("Waiting for PVC expansion to complete...")
-		err = kubernetes.WaitForPVCResized(ctx, watchClient, namespace, pvcName, newSize, WaitForPVCResizedTimeout)
+		podRestartedForResize := false
+		err = wait.PollUntilContextTimeout(ctx, pollInterval, WaitForPVCResizedTimeout, true, func(ctx context.Context) (bool, error) {
+			curPVC := &corev1.PersistentVolumeClaim{}
+			if err := watchClient.Get(ctx, client.ObjectKey{Name: pvcName, Namespace: namespace}, curPVC); err != nil {
+				return false, nil
+			}
+			if currentSize, ok := curPVC.Status.Capacity[corev1.ResourceStorage]; ok && currentSize.Cmp(newSize) >= 0 {
+				return true, nil
+			}
+			if !podRestartedForResize {
+				for _, cond := range curPVC.Status.Conditions {
+					if cond.Type == corev1.PersistentVolumeClaimFileSystemResizePending && cond.Status == corev1.ConditionTrue {
+						t.Logf("PVC %s has FileSystemResizePending; restarting pod %s to complete filesystem resize on node", pvcName, podName)
+						podObj := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace}}
+						_ = watchClient.Delete(ctx, podObj)
+						podRestartedForResize = true
+						break
+					}
+				}
+			}
+			return false, nil
+		})
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("PVC %s in %s namespace failed to expand in time: %v", pvcName, namespace, err)
+		}
+		if err := kubernetes.WaitForPodReady(ctx, watchClient, namespace, podName, WaitForPodReadyTimeout); err != nil {
+			t.Fatalf("Pod %s not ready after PVC expansion: %v", podName, err)
 		}
 
 		t.Logf("Verifying file content in pod %s in %s namespace", podName, namespace)
 		verifyFileContentCmd := []string{"grep", testFileContent, testFilePath}
-		err = kubernetes.ExecPod(ctx, goClient, restConfig, verifyFileContentCmd, namespace, podName)
+		err = wait.PollUntilContextTimeout(ctx, pollInterval, pollTimeout, true, func(ctx context.Context) (bool, error) {
+			if err := kubernetes.ExecPod(ctx, goClient, restConfig, verifyFileContentCmd, namespace, podName); err != nil {
+				t.Logf("Verification attempt after expansion failed: %v. Retrying in %s.", err, pollInterval)
+				return false, nil
+			}
+			return true, nil
+		})
 		if err != nil {
 			t.Fatalf("Verification failed after expansion. File content was lost or pod is unstable: pod: %s namespace:%s %v", podName, namespace, err)
 		}
