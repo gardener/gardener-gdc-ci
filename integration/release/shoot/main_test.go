@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"net/url"
 	"sort"
 	"strings"
@@ -30,6 +31,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -64,6 +66,7 @@ const (
 	cdiUsePopulatorAnnotationKey        = "cdi.kubevirt.io/storage.usePopulator"
 	cdiBindImmediateRequestedAnnotation = "cdi.kubevirt.io/storage.bind.immediate.requested"
 	selectedNodeAnnotationKey           = "volume.kubernetes.io/selected-node"
+	stuckEtcdMountRecoveryThreshold     = 3 * time.Minute
 	// subnetPrefixLength is set to /27 (32 IPs).
 	// Rationale for /27:
 	// 1. Capacity: A /27 subnet provides 32 IPs, which splitCIDR divides into /28 (16 IPs)
@@ -217,6 +220,7 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 	shootNamespace := "shoot--" + shootKey.Namespace + "--" + shootKey.Name
 	netpolCreated := false
 	etcdPVCsPrecreated := false
+	lastEtcdMountRecovery := make(map[string]time.Time)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -326,6 +330,8 @@ func ensureSeedShootNamespaceWorkarounds(ctx context.Context, t *testing.T, cfg 
 					}
 				}
 			}
+
+			remediateStuckEtcdVolumeAttachments(ctx, seedClient, shootNamespace, lastEtcdMountRecovery)
 		}
 	}
 }
@@ -349,6 +355,78 @@ func listReadySeedNodeNames(ctx context.Context, c client.Client) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// TODO(gkecl/2393636): Interim CI mitigation only. Remove this self-healing once the
+// third_party/kubevirt/csi-driver fix for the premature VolumeAttachment.Status.Attached=true
+// fast-path has rolled out to the staging GDC Seed clusters.
+//
+// remediateStuckEtcdVolumeAttachments detects etcd-* pods stuck in ContainerCreating for >3 minutes
+// due to KubeVirt CSI's premature VolumeAttachment.Status.Attached=true fast-path (when EnsureVolumeAvailable
+// timed out on the first attempt and NodeStageVolume fails with "couldn't find device by serial id").
+// Deleting the stale VolumeAttachment and pod triggers csi-attacher to detach and cleanly re-attach the volume.
+//
+// It runs inside the ensureSeedShootNamespaceWorkarounds goroutine, so it logs via log.Printf rather than
+// testing.T to avoid "Log in goroutine after Test... has completed" panics when the watch context is cancelled.
+func remediateStuckEtcdVolumeAttachments(ctx context.Context, seedClient client.Client, shootNamespace string, lastRecovery map[string]time.Time) {
+	podList := &corev1.PodList{}
+	if err := seedClient.List(ctx, podList, client.InNamespace(shootNamespace), client.MatchingLabels{"app.kubernetes.io/managed-by": "etcd-druid"}); err != nil {
+		return
+	}
+	now := time.Now()
+	for _, pod := range podList.Items {
+		if pod.Status.Phase != corev1.PodPending || now.Sub(pod.CreationTimestamp.Time) < stuckEtcdMountRecoveryThreshold {
+			continue
+		}
+		if last, ok := lastRecovery[pod.Name]; ok && now.Sub(last) < stuckEtcdMountRecoveryThreshold {
+			continue
+		}
+		eventList := &corev1.EventList{}
+		if err := seedClient.List(ctx, eventList, client.InNamespace(shootNamespace)); err != nil {
+			continue
+		}
+		stuckSerialID := false
+		for _, ev := range eventList.Items {
+			if ev.InvolvedObject.Kind == "Pod" && ev.InvolvedObject.Name == pod.Name &&
+				ev.Reason == "FailedMount" && strings.Contains(ev.Message, "couldn't find device by serial id") {
+				stuckSerialID = true
+				break
+			}
+		}
+		if !stuckSerialID {
+			continue
+		}
+
+		var pvNames []string
+		for _, vol := range pod.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil {
+				pvc := &corev1.PersistentVolumeClaim{}
+				if err := seedClient.Get(ctx, client.ObjectKey{Name: vol.PersistentVolumeClaim.ClaimName, Namespace: shootNamespace}, pvc); err == nil && pvc.Spec.VolumeName != "" {
+					pvNames = append(pvNames, pvc.Spec.VolumeName)
+				}
+			}
+		}
+		if len(pvNames) > 0 {
+			vaList := &storagev1.VolumeAttachmentList{}
+			if err := seedClient.List(ctx, vaList); err == nil {
+				for _, va := range vaList.Items {
+					if va.Spec.Source.PersistentVolumeName != nil {
+						for _, pvName := range pvNames {
+							if *va.Spec.Source.PersistentVolumeName == pvName {
+								vaCopy := va
+								log.Printf("Deleting stale VolumeAttachment %s for stuck pod %s/%s (PV %s)", va.Name, shootNamespace, pod.Name, pvName)
+								_ = seedClient.Delete(ctx, &vaCopy)
+							}
+						}
+					}
+				}
+			}
+		}
+		podCopy := pod
+		log.Printf("Deleting stuck Etcd pod %s/%s to re-trigger CSI volume attachment", shootNamespace, pod.Name)
+		_ = seedClient.Delete(ctx, &podCopy)
+		lastRecovery[pod.Name] = now
+	}
 }
 
 func createCloudprofile(ctx context.Context, gardenClient client.WithWatch, cfg *config.ReleaseTestConfig, t *testing.T) {
