@@ -36,6 +36,9 @@ const (
 	// TestImageName is the name of the container image used in Shoot Cluster tests.
 	TestImageName = "nginx:alpine"
 
+	// AirgappedTestImagePath is the path within Harbor for the test image used in air-gapped GDCH Shoot tests.
+	AirgappedTestImagePath = "europe-docker.pkg.dev/gardener-project/releases/gardener/alpine-conntrack:3.24.1"
+
 	// CloudControllerManagerImageName is the name of the cloud controller manager image.
 	CloudControllerManagerImageName = "cloud-controller-manager-gdch"
 
@@ -70,4 +73,13 @@ func init() {
 	flag.String("gdcloud-cli-path", "", "dummy flag for gdcloud-cli-path")
 	flag.String("pa-sa-key-path", "", "dummy flag for pa-sa-key-path")
 	flag.String("allocate-new-user-cluster", "", "dummy flag for allocate-new-user-cluster")
+}
+
+// GetTestImage returns the container image to use for Shoot cluster tests, using the Harbor
+// registry image when harborRegistryURL is provided (air-gapped GDCH environments).
+func GetTestImage(harborRegistryURL string) string {
+	if harborRegistryURL != "" {
+		return harborRegistryURL + "/" + AirgappedTestImagePath
+	}
+	return TestImageName
 }
