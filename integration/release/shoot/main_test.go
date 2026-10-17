@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 	"testing"
@@ -177,10 +178,102 @@ func createShoot(ctx context.Context, gardenClient client.WithWatch, cfg *config
 	watchCtx, cancelWatch := context.WithCancel(ctx)
 	defer cancelWatch()
 	go ensureSeedShootNamespaceWorkarounds(watchCtx, t, cfg, shootKey)
+	go monitorShootControlPlaneOnSeed(watchCtx, cfg, "shoot--garden--"+cfg.TestShoot.Name)
 
 	err = gardener.WaitForShootReconciliation(ctx, gardenClient, shootKey, waitForShootCreationTimeout)
 	if err != nil {
 		t.Fatalf("shoot \"%q/%q\" reconciliation failed or timed out: %v", shoot.Namespace, shoot.Name, err)
+	}
+}
+
+func monitorShootControlPlaneOnSeed(ctx context.Context, cfg *config.ReleaseTestConfig, shootControlPlaneNS string) {
+	if cfg == nil {
+		return
+	}
+	var seedClient client.Client
+	if cfg.GDC != nil && cfg.GDC.UseUserClusterAsSeed && cfg.RuntimeClusterClient != nil {
+		seedClient = cfg.RuntimeClusterClient
+	} else if cfg.Seed != nil && cfg.Seed.HostCluster != nil && cfg.Seed.HostCluster.UserClusterClient != nil {
+		seedClient = cfg.Seed.HostCluster.UserClusterClient
+	} else if cfg.RuntimeClusterClient != nil {
+		seedClient = cfg.RuntimeClusterClient
+	}
+	if seedClient == nil {
+		return
+	}
+
+	reclaimVPAOnUnschedulable := cfg.GDC != nil && cfg.GDC.UseUserClusterAsSeed
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			podList := &corev1.PodList{}
+			if err := seedClient.List(ctx, podList, client.InNamespace(shootControlPlaneNS)); err != nil {
+				continue
+			}
+			if len(podList.Items) == 0 {
+				continue
+			}
+			var nonReadySummaries []string
+			hasUnschedulable := false
+			for i := range podList.Items {
+				pod := &podList.Items[i]
+				ready := false
+				var schedReason, schedMsg string
+				for _, cond := range pod.Status.Conditions {
+					if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+						ready = true
+					}
+					if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse {
+						schedReason = cond.Reason
+						schedMsg = cond.Message
+						if cond.Reason == corev1.PodReasonUnschedulable {
+							hasUnschedulable = true
+						}
+					}
+				}
+				if !ready {
+					detail := string(pod.Status.Phase)
+					if schedReason != "" {
+						detail = fmt.Sprintf("%s (%s: %s)", detail, schedReason, schedMsg)
+					} else {
+						for _, cs := range pod.Status.ContainerStatuses {
+							if !cs.Ready && cs.State.Waiting != nil {
+								detail = fmt.Sprintf("%s (container %s waiting: %s - %s)", detail, cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message)
+								break
+							}
+						}
+					}
+					nonReadySummaries = append(nonReadySummaries, fmt.Sprintf("%s=%s", pod.Name, detail))
+				}
+			}
+			if len(nonReadySummaries) > 0 {
+				log.Printf("[Seed %s] %d/%d pods non-ready: %s", shootControlPlaneNS, len(nonReadySummaries), len(podList.Items), strings.Join(nonReadySummaries, "; "))
+			}
+			if hasUnschedulable && reclaimVPAOnUnschedulable {
+				for _, ns := range []string{"virtual-garden-istio-ingress", "istio-ingress", "istio-system", "garden"} {
+					pList := &corev1.PodList{}
+					if err := seedClient.List(ctx, pList, client.InNamespace(ns)); err == nil {
+						for i := range pList.Items {
+							p := &pList.Items[i]
+							if p.DeletionTimestamp != nil || len(p.Spec.Containers) == 0 {
+								continue
+							}
+							if p.Labels["app"] == "istio-ingressgateway" || p.Labels["app"] == "istiod" || (p.Labels["app"] == "gardener" && (p.Labels["role"] == "controller-manager" || p.Labels["role"] == "admission-controller" || p.Labels["role"] == "scheduler")) {
+								if cpuReq := p.Spec.Containers[0].Resources.Requests.Cpu(); cpuReq != nil && cpuReq.MilliValue() >= 400 {
+									log.Printf("[Seed %s] Deleting un-resized pod %s/%s (CPU request %dm) to free CPU for Shoot control plane...", shootControlPlaneNS, ns, p.Name, cpuReq.MilliValue())
+									_ = seedClient.Delete(ctx, p)
+									break
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
