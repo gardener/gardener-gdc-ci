@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -143,6 +144,8 @@ func TestClusterStorageLifecycle(t *testing.T) {
 	}
 
 	stsCreated := t.Run("Verify Creation of Statefulset", func(t *testing.T) {
+		ensureCSINodeTopology(ctx, t, watchClient)
+
 		t.Logf("Creating StatefulSet %s in %s namespace", statefulSetName, namespace)
 		err := watchClient.Create(ctx, statefulSet)
 		if err != nil {
@@ -324,6 +327,60 @@ func TestClusterStorageLifecycle(t *testing.T) {
 		}
 		t.Logf("PV %s correctly has node affinity for zone %s", pvName, nodeZone)
 	})
+}
+
+func ensureCSINodeTopology(ctx context.Context, t *testing.T, watchClient client.WithWatch) {
+	restartedNodes := make(map[string]bool)
+	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		nodeList := &corev1.NodeList{}
+		if err := watchClient.List(ctx, nodeList); err != nil {
+			t.Logf("Warning: failed to list shoot nodes: %v", err)
+			return false, nil
+		}
+		if len(nodeList.Items) == 0 {
+			return false, nil
+		}
+		allReady := true
+		for _, node := range nodeList.Items {
+			csiNode := &storagev1.CSINode{}
+			hasZoneTopology := false
+			if err := watchClient.Get(ctx, client.ObjectKey{Name: node.Name}, csiNode); err == nil {
+				for _, drv := range csiNode.Spec.Drivers {
+					if drv.Name == "csi.kubevirt.io" {
+						for _, tk := range drv.TopologyKeys {
+							if tk == zoneTopologyKey {
+								hasZoneTopology = true
+								break
+							}
+						}
+					}
+				}
+			}
+			if !hasZoneTopology {
+				allReady = false
+				t.Logf("Node %s CSINode does not yet have %s in csi.kubevirt.io topologyKeys", node.Name, zoneTopologyKey)
+				if !restartedNodes[node.Name] && node.Labels[zoneTopologyKey] != "" {
+					podList := &corev1.PodList{}
+					if err := watchClient.List(ctx, podList, client.InNamespace("kube-system")); err == nil {
+						for i := range podList.Items {
+							p := &podList.Items[i]
+							if p.Spec.NodeName == node.Name && p.Labels["app"] == "kubevirt-csi-driver" {
+								t.Logf("Restarting kubevirt-csi-node pod %s on node %s to refresh CSINode topology keys", p.Name, node.Name)
+								_ = watchClient.Delete(ctx, p)
+								restartedNodes[node.Name] = true
+							}
+						}
+					}
+				}
+			}
+		}
+		return allReady, nil
+	})
+	if err != nil {
+		t.Logf("Warning: timed out waiting for all CSINodes to report %s topology key: %v", zoneTopologyKey, err)
+	} else {
+		t.Logf("Verified all Shoot CSINodes have csi.kubevirt.io registered with %s", zoneTopologyKey)
+	}
 }
 
 func uniqueSuffix() string {
