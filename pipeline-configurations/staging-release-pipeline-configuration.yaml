@@ -64,7 +64,7 @@ gardener:
   csiImages:
     csiDriver:
       repository: gardener-harbor-sapbtp.gdc1.us-west6-a.staging.gpcdemolabs.com/sap-gardener/csi-driver-gdch
-      tag: "v0.0.0-gke.36-abb7721"
+      tag: "v0.0.0-gke.36-dilipkumardk1"
     csiProvisioner:
       repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-provisioner
       tag: "v5.2.0-gke.20"
