@@ -65,6 +65,17 @@ func TestShootClusterScaling(t *testing.T) {
 	// Fetch the initial state of the Shoot
 	t.Logf("Fetching initial state for Shoot %s/%s", shootKey.Namespace, shootKey.Name)
 	gardenClient := releasePipelineCfg.TestShoot.VirtualGarden.Client
+	initialShoot, err := gardener.GetShoot(ctx, gardenClient, shootKey)
+	if err != nil {
+		t.Fatalf("failed to get Shoot %s/%s: %v", shootKey.Namespace, shootKey.Name, err)
+	}
+	if len(initialShoot.Spec.Provider.Workers) == 0 {
+		t.Fatalf("Shoot %s/%s has no worker pools", shootKey.Namespace, shootKey.Name)
+	}
+	originalPoolMin := initialShoot.Spec.Provider.Workers[0].Minimum
+	originalPoolMax := initialShoot.Spec.Provider.Workers[0].Maximum
+	originalWorkerCount := totalDesiredWorkers(initialShoot.Spec.Provider.Workers)
+
 	t.Logf("Creating shoot client for %s/%s", shootKey.Namespace, shootKey.Name)
 	shootClients, err := gardener.NewShootClient(ctx, gardenClient, shootKey)
 	if err != nil {
@@ -72,32 +83,40 @@ func TestShootClusterScaling(t *testing.T) {
 	}
 	shootWatchClient := shootClients.WatchClient
 	t.Log("Getting initial node count for shoot cluster")
-	originalWorkerCount, err := getNodeCount(ctx, shootWatchClient)
+	initialNodeCount, err := getNodeCount(ctx, shootWatchClient)
 	if err != nil {
 		t.Fatalf("failed to get initial node count: %v", err)
 	}
-	t.Logf("Initial node count for shoot '%s' is %d", releasePipelineCfg.TestShoot.Name, originalWorkerCount)
+	t.Logf("Initial node count for shoot '%s' is %d (pool %q min=%d, max=%d, total desired=%d)",
+		releasePipelineCfg.TestShoot.Name, initialNodeCount, initialShoot.Spec.Provider.Workers[0].Name, originalPoolMin, originalPoolMax, originalWorkerCount)
 
-	// Ensures the cluster is returned to its original state, even if a sub-test fails.
+	// Ensures the cluster is returned to its original state, even if a sub-test fails
+	// before the new node registers in the Shoot cluster.
 	t.Cleanup(func() {
-		t.Logf("--- CLEANUP: Restoring worker count to original value of %d ---", originalWorkerCount)
-		currentNodeCount, err := getNodeCount(ctx, shootWatchClient)
-		if err != nil {
-			t.Fatalf("failed to get current node count: %v", err)
+		t.Logf("--- CLEANUP: Ensuring worker pool %q is restored to min=%d, max=%d (total nodes=%d) ---",
+			initialShoot.Spec.Provider.Workers[0].Name, originalPoolMin, originalPoolMax, originalWorkerCount)
+		curShoot, getErr := gardener.GetShoot(ctx, gardenClient, shootKey)
+		if getErr != nil {
+			t.Fatalf("failed to get Shoot during cleanup: %v", getErr)
 		}
-		// Only trigger a reconciliation if the count is different.
-		if currentNodeCount != originalWorkerCount {
-			scaleAmount := originalWorkerCount - currentNodeCount
-			scaleAndVerifyShoot(t, ctx, gardenClient, shootKey, scaleAmount)
+		currentNodeCount, nodeErr := getNodeCount(ctx, shootWatchClient)
+		if nodeErr != nil {
+			t.Fatalf("failed to get current node count during cleanup: %v", nodeErr)
+		}
+		specModified := len(curShoot.Spec.Provider.Workers) > 0 &&
+			(curShoot.Spec.Provider.Workers[0].Minimum != originalPoolMin || curShoot.Spec.Provider.Workers[0].Maximum != originalPoolMax)
+		if specModified || currentNodeCount != originalWorkerCount {
+			scaleAndVerifyShoot(t, ctx, gardenClient, shootKey, originalPoolMin, originalPoolMax, originalWorkerCount)
 			t.Log("--- CLEANUP: Successfully restored worker count. ---")
 		} else {
-			t.Log("--- CLEANUP: Worker count is already at original value. No action needed. ---")
+			t.Log("--- CLEANUP: Worker spec and node count are already at original values. No action needed. ---")
 		}
 	})
 
 	scaleUpSuccess := t.Run("Scale Up", func(t *testing.T) {
 		t.Logf("Scaling up shoot cluster %s by %d nodes", releasePipelineCfg.TestShoot.Name, nodeScalingAmount)
-		scaleAndVerifyShoot(t, ctx, gardenClient, shootKey, nodeScalingAmount)
+		scaleAndVerifyShoot(t, ctx, gardenClient, shootKey,
+			originalPoolMin+nodeScalingAmount, originalPoolMax+nodeScalingAmount, originalWorkerCount+nodeScalingAmount)
 	})
 	if !scaleUpSuccess {
 		t.Fatalf("Failed to scale up shoot cluster, aborting flow")
@@ -105,36 +124,39 @@ func TestShootClusterScaling(t *testing.T) {
 
 	t.Run("Scale Down", func(t *testing.T) {
 		t.Logf("Scaling down shoot cluster %s by %d nodes", releasePipelineCfg.TestShoot.Name, nodeScalingAmount)
-		scaleAndVerifyShoot(t, ctx, gardenClient, shootKey, -nodeScalingAmount)
+		scaleAndVerifyShoot(t, ctx, gardenClient, shootKey, originalPoolMin, originalPoolMax, originalWorkerCount)
 	})
 }
 
+func totalDesiredWorkers(workers []gardencorev1beta1.Worker) int32 {
+	var total int32
+	for _, w := range workers {
+		total += w.Minimum
+	}
+	return total
+}
+
 // scaleAndVerifyShoot is a helper function that encapsulates the core test logic:
-// 1. Update the Shoot worker count.
+// 1. Update the Shoot worker pool minimum and maximum to explicit target values.
 // 2. Wait for the shoot reconciliation to complete.
-// 3. Verify the actual number of nodes in the Shoot cluster matches the new count.
-func scaleAndVerifyShoot(t *testing.T, ctx context.Context, gardenClient client.WithWatch, shootKey client.ObjectKey, scaleAmount int32) {
+// 3. Verify the actual number of nodes in the Shoot cluster matches targetNodeCount.
+func scaleAndVerifyShoot(t *testing.T, ctx context.Context, gardenClient client.WithWatch, shootKey client.ObjectKey, targetPoolMin, targetPoolMax, targetNodeCount int32) {
 	t.Helper()
 	shootClients, err := gardener.NewShootClient(ctx, gardenClient, shootKey)
 	if err != nil {
 		t.Fatalf("failed to create client for the shoot cluster: %v", err)
 	}
 	shootWatchClient := shootClients.WatchClient
-	currentNodeCount, err := getNodeCount(ctx, shootWatchClient)
-	if err != nil {
-		t.Fatalf("failed to get current node count: %v", err)
-	}
-	targetNodeCount := currentNodeCount + scaleAmount
-	t.Logf("Attempting to scale worker count to %d nodes", targetNodeCount)
+	t.Logf("Attempting to set worker pool[0] min=%d, max=%d (target total nodes=%d)", targetPoolMin, targetPoolMax, targetNodeCount)
 
 	t.Logf("Updating Shoot spec in the Garden cluster")
 	err = gardener.UpdateShoot(ctx, gardenClient, shootKey, func(shoot *gardencorev1beta1.Shoot) {
 		if len(shoot.Spec.Provider.Workers) == 0 {
 			t.Fatalf("Shoot %s has no worker pools", shootKey.Name)
 		}
-		t.Logf("Scale up the worker pool %s", shoot.Spec.Provider.Workers[0].Name)
-		shoot.Spec.Provider.Workers[0].Minimum += scaleAmount
-		shoot.Spec.Provider.Workers[0].Maximum += scaleAmount
+		t.Logf("Updating worker pool %s to min=%d, max=%d", shoot.Spec.Provider.Workers[0].Name, targetPoolMin, targetPoolMax)
+		shoot.Spec.Provider.Workers[0].Minimum = targetPoolMin
+		shoot.Spec.Provider.Workers[0].Maximum = targetPoolMax
 	})
 	if err != nil {
 		t.Fatalf("failed to update shoot spec for scaling: %v", err)
