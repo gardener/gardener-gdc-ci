@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -32,6 +32,31 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Sync dashboard UI with gh-pages branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch origin gh-pages:refs/remotes/origin/gh-pages
+            if git show origin/gh-pages:data/runs.json > ./dashboard/data/runs.json.remote 2>/dev/null; then
+              mv ./dashboard/data/runs.json.remote ./dashboard/data/runs.json
+            fi
+            PAGES_WORK_DIR="$(mktemp -d)"
+            if git clone --branch gh-pages "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${PAGES_WORK_DIR}"; then
+              cp ./dashboard/index.html "${PAGES_WORK_DIR}/index.html"
+              touch "${PAGES_WORK_DIR}/.nojekyll"
+              git -C "${PAGES_WORK_DIR}" config user.name "github-actions[bot]"
+              git -C "${PAGES_WORK_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git -C "${PAGES_WORK_DIR}" add index.html .nojekyll
+              if ! git -C "${PAGES_WORK_DIR}" diff --cached --quiet; then
+                git -C "${PAGES_WORK_DIR}" commit -m "chore(dashboard): sync dashboard index.html from main"
+                git -C "${PAGES_WORK_DIR}" push origin gh-pages
+                gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" >/dev/null 2>&1 || true
+              fi
+            fi
+            rm -rf "${PAGES_WORK_DIR}"
+          fi
 
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0

@@ -228,6 +228,21 @@
       return `${secs}s`;
     }
 
+    function formatLocalTimestamp(isoStr) {
+      if (!isoStr || isoStr === '-') return '-';
+      const parsed = new Date(isoStr);
+      if (Number.isNaN(parsed.getTime())) return isoStr;
+      return new Intl.DateTimeFormat(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZoneName: 'short'
+      }).format(parsed);
+    }
+
     function computeLiveDuration(run) {
       if ((run.status === 'in_progress' || run.status === 'running' || run.status === 'queued' || run.status === 'waiting') && run.startedAtMs) {
         return formatDurationSeconds((Date.now() - run.startedAtMs) / 1000);
@@ -375,9 +390,10 @@
           ? `<code>${r.trigger || '-'}</code>`
           : `<code>${r.trigger}</code> (@${r.actor})`;
         const dur = computeLiveDuration(r);
+        const displayTimestamp = formatLocalTimestamp(r.timestamp);
         return `<tr>
           <td><a href="${r.runUrl}" target="_blank" rel="noopener">#${r.runNumber}</a></td>
-          <td>${r.timestamp}</td>
+          <td title="${r.timestamp || ''}">${displayTimestamp}</td>
           <td><span class="badge ${mode}">${mode}</span></td>
           <td>${triggerLabel}</td>
           <td><span class="badge ${r.status}">${r.status}</span></td>
