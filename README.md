@@ -31,8 +31,9 @@ Each pipeline run executes the following end-to-end qualification flow:
 
 The **[Gardener GDC Release Pipeline](https://github.com/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml)** runs automatically on a schedule and can also be triggered on demand by approved Google and SAP maintainers listed in [`OWNERS_ALIASES`](OWNERS_ALIASES) / [`CODEOWNERS`](CODEOWNERS).
 
-### 1. Automated Weeknight Schedule
-Runs automatically every weeknight (**Monday–Friday at `02:00 PST`**) in `snapshot` mode against the default branches of all component repositories.
+### 1. Automated Schedules
+- **Nightly Snapshot (`snapshot` mode)**: Runs automatically every weeknight (**Monday–Friday at `02:00 PST` / `10:00 UTC`**) against the default branches of all component repositories, and automatically skips Tuesday's snapshot on biweekly release weeks.
+- **Biweekly Official Release (`release` mode)**: Runs automatically **once every two weeks on Tuesday at `21:00 PST` (`9:00 PM PST` / Wednesday `05:00 UTC`)** with `next_version=bump-patch`, leaving a ~4–5 hour gap before the next snapshot run to avoid cluster pool collisions.
 
 ### 2. Pull Request Comment (`/test-release`)
 To run the full E2E pipeline against an open Pull Request in `gardener/gardener-gdc-ci`, comment on the PR:

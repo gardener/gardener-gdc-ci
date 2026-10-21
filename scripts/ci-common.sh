@@ -6,9 +6,41 @@
 set -euo pipefail
 
 # verify_authorized_maintainer ensures that workflow_dispatch and /test-release issue_comment runs
-# can only be triggered by approved Google and SAP maintainers listed in OWNERS_ALIASES.
+# can only be triggered by approved Google and SAP maintainers listed in OWNERS_ALIASES,
+# gates the Tuesday 21:00 PST (Wednesday 05:00 UTC, '0 5 * * 3') release schedule to run biweekly,
+# and skips the Tuesday 02:00 PST (10:00 UTC) snapshot run on active biweekly release Tuesdays.
 verify_authorized_maintainer() {
   local owners_file="${1:-OWNERS_ALIASES}"
+  if [[ "${GITHUB_EVENT_NAME:-}" == "schedule" ]]; then
+    local schedule_cron="${SCHEDULE_CRON:-}"
+    if [[ -z "${schedule_cron}" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
+      schedule_cron="$(jq -r '.schedule // empty' "${GITHUB_EVENT_PATH}")"
+    fi
+    local current_epoch="${CURRENT_EPOCH:-$(date -u +%s)}"
+    local epoch_week=$(( current_epoch / 604800 ))
+    local day_of_week=$(( ((current_epoch / 86400) + 3) % 7 + 1 ))
+    if [[ "${schedule_cron}" == "0 5 * * 3" ]]; then
+      if (( epoch_week % 2 != 0 )); then
+        echo "Biweekly release schedule ('${schedule_cron}') triggered on off-week (epoch_week=${epoch_week}). Skipping."
+        if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+          echo "should_run=false" >> "${GITHUB_OUTPUT}"
+          echo "pr_number=" >> "${GITHUB_OUTPUT}"
+        fi
+        return 0
+      fi
+      echo "Biweekly release schedule ('${schedule_cron}') triggered on active release week (epoch_week=${epoch_week}). Proceeding."
+    elif [[ "${schedule_cron}" == "0 10 * * 1-5" ]]; then
+      if (( epoch_week % 2 == 0 && day_of_week == 2 )); then
+        echo "Nightly snapshot schedule ('${schedule_cron}') triggered on biweekly release Tuesday (epoch_week=${epoch_week}). Skipping snapshot in favor of release."
+        if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+          echo "should_run=false" >> "${GITHUB_OUTPUT}"
+          echo "pr_number=" >> "${GITHUB_OUTPUT}"
+        fi
+        return 0
+      fi
+    fi
+  fi
+
   if [[ "${GITHUB_EVENT_NAME:-}" != "workflow_dispatch" && "${GITHUB_EVENT_NAME:-}" != "issue_comment" && "${GITHUB_EVENT_NAME:-}" != "pull_request" ]]; then
     echo "Trigger event is '${GITHUB_EVENT_NAME:-local}'; maintainer check not required."
     if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
