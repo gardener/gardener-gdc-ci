@@ -5,12 +5,11 @@
 name: Gardener GDC Release Pipeline
 
 on:
-  # Automated schedules:
-  # - Nightly snapshot: Monday through Friday at 02:00 PST (10:00 UTC; no weekend runs, skipped on biweekly release Tuesdays)
-  # - Biweekly official release: Tuesday at 21:00 PST / 9:00 PM PST (Wednesday 05:00 UTC; gated to every 2 weeks in authorize)
+  # Automated schedule: one weekday run, Monday through Friday at 02:00 PST (10:00 UTC; no weekend runs).
+  # The authorize job picks the mode: on a biweekly release Wednesday (even Unix epoch week) the run is
+  # the official SemVer release and no separate snapshot runs that day; otherwise it is the nightly snapshot.
   schedule:
     - cron: '0 10 * * 1-5'
-    - cron: '0 5 * * 3'
   # Allow authorized maintainers to trigger on Pull Requests via '/test-release' comment
   issue_comment:
     types: [created]
@@ -95,6 +94,9 @@ jobs:
     outputs:
       should_run: ${{ steps.auth.outputs.should_run }}
       pr_number: ${{ steps.auth.outputs.pr_number }}
+      # Resolved execution mode. Set by the schedule path ('release' on biweekly Wednesdays, else 'snapshot');
+      # empty for manual and PR-comment triggers, which derive the mode from their inputs below.
+      release_mode: ${{ steps.auth.outputs.release_mode }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -104,7 +106,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          SCHEDULE_CRON: ${{ github.event.schedule }}
         run: |
           source ./scripts/ci-common.sh
           verify_authorized_maintainer OWNERS_ALIASES
@@ -123,7 +124,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GDC_RELEASE_GITHUB_TOKEN: ${{ secrets.GDC_RELEASE_GITHUB_TOKEN }}
       PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-      RELEASE_MODE: ${{ ((github.event_name == 'schedule' && github.event.schedule == '0 5 * * 3') || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'release') || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/test-release release'))) && 'release' || 'snapshot' }}
+      RELEASE_MODE: ${{ (needs.authorize.outputs.release_mode == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'release') || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/test-release release'))) && 'release' || 'snapshot' }}
       NEXT_VERSION: ${{ inputs.next_version || 'bump-patch' }}
       EXTENSION_GDC_REF: ${{ inputs.extension_gdc_ref || 'main' }}
       MCM_PROVIDER_GDC_REF: ${{ inputs.mcm_provider_gdc_ref || 'main' }}
@@ -207,7 +208,7 @@ jobs:
         if: success() && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
         uses: gardener/cc-utils/.github/actions/params@v1
         with:
-          mode: ${{ ((github.event_name == 'schedule' && github.event.schedule == '0 5 * * 3') || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'release') || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/test-release release'))) && 'release' || 'snapshot' }}
+          mode: ${{ env.RELEASE_MODE }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Authenticate to Gardener Public Registry (OIDC via gardener/cc-utils)

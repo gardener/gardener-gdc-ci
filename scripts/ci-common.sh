@@ -6,38 +6,25 @@
 set -euo pipefail
 
 # verify_authorized_maintainer ensures that workflow_dispatch and /test-release issue_comment runs
-# can only be triggered by approved Google and SAP maintainers listed in OWNERS_ALIASES,
-# gates the Tuesday 21:00 PST (Wednesday 05:00 UTC, '0 5 * * 3') release schedule to run biweekly,
-# and skips the Tuesday 02:00 PST (10:00 UTC) snapshot run on active biweekly release Tuesdays.
+# can only be triggered by approved Google and SAP maintainers listed in OWNERS_ALIASES, and
+# resolves the execution mode for the single weekday schedule ('0 10 * * 1-5', 02:00 PST):
+# on a biweekly release Wednesday (even Unix epoch week) the run is the official release and no
+# separate snapshot runs that day; on every other weekday it is the nightly snapshot.
 verify_authorized_maintainer() {
   local owners_file="${1:-OWNERS_ALIASES}"
   if [[ "${GITHUB_EVENT_NAME:-}" == "schedule" ]]; then
-    local schedule_cron="${SCHEDULE_CRON:-}"
-    if [[ -z "${schedule_cron}" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
-      schedule_cron="$(jq -r '.schedule // empty' "${GITHUB_EVENT_PATH}")"
-    fi
     local current_epoch="${CURRENT_EPOCH:-$(date -u +%s)}"
     local epoch_week=$(( current_epoch / 604800 ))
-    local day_of_week=$(( ((current_epoch / 86400) + 3) % 7 + 1 ))
-    if [[ "${schedule_cron}" == "0 5 * * 3" ]]; then
-      if (( epoch_week % 2 != 0 )); then
-        echo "Biweekly release schedule ('${schedule_cron}') triggered on off-week (epoch_week=${epoch_week}). Skipping."
-        if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-          echo "should_run=false" >> "${GITHUB_OUTPUT}"
-          echo "pr_number=" >> "${GITHUB_OUTPUT}"
-        fi
-        return 0
-      fi
-      echo "Biweekly release schedule ('${schedule_cron}') triggered on active release week (epoch_week=${epoch_week}). Proceeding."
-    elif [[ "${schedule_cron}" == "0 10 * * 1-5" ]]; then
-      if (( epoch_week % 2 == 0 && day_of_week == 2 )); then
-        echo "Nightly snapshot schedule ('${schedule_cron}') triggered on biweekly release Tuesday (epoch_week=${epoch_week}). Skipping snapshot in favor of release."
-        if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-          echo "should_run=false" >> "${GITHUB_OUTPUT}"
-          echo "pr_number=" >> "${GITHUB_OUTPUT}"
-        fi
-        return 0
-      fi
+    local day_of_week=$(( ((current_epoch / 86400) + 3) % 7 + 1 ))  # Mon=1 .. Sun=7
+    local release_mode="snapshot"
+    if (( day_of_week == 3 && epoch_week % 2 == 0 )); then
+      release_mode="release"
+      echo "Schedule triggered on a biweekly release Wednesday (epoch_week=${epoch_week}); running the official release instead of the nightly snapshot."
+    else
+      echo "Schedule triggered on a regular weekday (epoch_week=${epoch_week}, day_of_week=${day_of_week}); running the nightly snapshot."
+    fi
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+      echo "release_mode=${release_mode}" >> "${GITHUB_OUTPUT}"
     fi
   fi
 
