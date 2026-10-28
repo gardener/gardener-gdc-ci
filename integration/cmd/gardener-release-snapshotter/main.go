@@ -17,10 +17,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
+	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -204,10 +208,95 @@ func main() {
 		}
 	}
 
+	// When multiple Shoot clusters are provisioned (e.g., via --num-shoots > 1),
+	// also capture snapshots for any additional "<TestShoot.Name>-*" Shoots in the namespace.
+	if releasePipelineCfg.TestShoot != nil &&
+		releasePipelineCfg.TestShoot.VirtualGarden != nil &&
+		releasePipelineCfg.TestShoot.VirtualGarden.Client != nil &&
+		releasePipelineCfg.TestShoot.Namespace != "" &&
+		releasePipelineCfg.TestShoot.Name != "" {
+		var shootSnapshotConfig *snapshot.ClusterSnapshotConfig
+		if resources != nil {
+			for i := range resources.Clusters {
+				if resources.Clusters[i].ClusterName == ClusterShoot {
+					shootSnapshotConfig = &resources.Clusters[i]
+					break
+				}
+			}
+		}
+		for _, extraShootName := range discoverAdditionalShootNames(ctx, releasePipelineCfg.TestShoot.VirtualGarden.Client, releasePipelineCfg.TestShoot.Namespace, releasePipelineCfg.TestShoot.Name) {
+			extraKey := client.ObjectKey{
+				Namespace: releasePipelineCfg.TestShoot.Namespace,
+				Name:      extraShootName,
+			}
+			log.Printf("Creating client for additional Shoot %q in namespace %q", extraKey.Name, extraKey.Namespace)
+			extraClients, err := gardener.NewShootClient(ctx, releasePipelineCfg.TestShoot.VirtualGarden.Client, extraKey)
+			if err != nil || extraClients == nil || extraClients.WatchClient == nil {
+				log.Printf("Warning: Failed to create client for additional Shoot %s: %v. Skipping snapshot.", extraKey.Name, err)
+				continue
+			}
+			extraClusterName := fmt.Sprintf("%s-%s", ClusterShoot, extraShootName)
+			log.Printf("Starting snapshot capture for cluster %s", extraClusterName)
+			extraDir := filepath.Join(combinedSnapshotsBuffer, extraClusterName)
+			if err := snapshot.CaptureSnapshotToDir(ctx, snapshot.SnapshotClients{CRClient: extraClients.WatchClient, ClientSet: extraClients.Client}, extraDir, snapshot.CaptureOptions{Config: shootSnapshotConfig}); err != nil {
+				log.Printf("Warning: Snapshot capture failed for cluster %s: %v", extraClusterName, err)
+			}
+		}
+	}
+
+	// Capture zonal GDC management API clusters (VirtualMachine, VirtualMachineDisk, zonal Subnet, ProjectNetworkPolicy)
+	if len(releasePipelineCfg.ManagementClients) > 0 {
+		var zones []string
+		for zone := range releasePipelineCfg.ManagementClients {
+			zones = append(zones, zone)
+		}
+		sort.Strings(zones)
+		for _, zone := range zones {
+			mgmtClient := releasePipelineCfg.ManagementClients[zone]
+			if mgmtClient == nil {
+				continue
+			}
+			mgmtClusterName := fmt.Sprintf("management-cluster-%s", zone)
+			mgmtSnapshotConfig := &snapshot.ClusterSnapshotConfig{
+				ClusterName: mgmtClusterName,
+				Targets: []snapshot.NamespaceTarget{
+					{Namespace: releasePipelineCfg.GDC.Project},
+					{Namespace: releasePipelineCfg.GDC.SecondaryProject},
+				},
+			}
+			log.Printf("Starting snapshot capture for cluster %s", mgmtClusterName)
+			mgmtDir := filepath.Join(combinedSnapshotsBuffer, mgmtClusterName)
+			if err := snapshot.CaptureSnapshotToDir(ctx, snapshot.SnapshotClients{CRClient: mgmtClient}, mgmtDir, snapshot.CaptureOptions{Config: mgmtSnapshotConfig}); err != nil {
+				log.Printf("Warning: Snapshot capture failed for cluster %s: %v", mgmtClusterName, err)
+			}
+		}
+	}
+
 	log.Println("Uploading combined snapshots archive to gs://gardener-ci-pipeline")
 	if err := snapshot.UploadArchive(ctx, combinedSnapshotsBuffer, &uploadConfig, "all-clusters"); err != nil {
 		log.Fatalf("Failed to upload snapshot archive: %v", err)
 	}
 
 	log.Println("Snapshot completed successfully")
+}
+
+// discoverAdditionalShootNames lists Shoot clusters in namespace whose names match "<baseShootName>-*"
+// and returns them in sorted order.
+func discoverAdditionalShootNames(ctx context.Context, gardenClient client.Client, namespace, baseShootName string) []string {
+	if gardenClient == nil || namespace == "" || baseShootName == "" {
+		return nil
+	}
+	shootList := &gardencorev1beta1.ShootList{}
+	if err := gardenClient.List(ctx, shootList, client.InNamespace(namespace)); err != nil {
+		return nil
+	}
+	prefix := baseShootName + "-"
+	var names []string
+	for _, s := range shootList.Items {
+		if strings.HasPrefix(s.Name, prefix) {
+			names = append(names, s.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }

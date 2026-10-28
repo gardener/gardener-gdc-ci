@@ -33,7 +33,10 @@ gdc:
   region: us-west6
   zones:
     - us-west6-a
-    - us-west6-c
+    # Disabled until gdc1 UNET cross-zone Global LoadBalancer routing from us-west6-c
+    # worker VMs to single-zone Seed host clusters (gardener-grover-3 in us-west6-a)
+    # is resolved and staging IPAM parent subnet capacity is expanded beyond /26.
+    # - us-west6-c
   labDomainURL: staging.gpcdemolabs.com
   managedDNSDomainName: sap.gardener.gpcdemolabs.com
   globalAPIURL: https://global-api.gdc1.us-west6-c.staging.gpcdemolabs.com

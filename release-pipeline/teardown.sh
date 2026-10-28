@@ -8,15 +8,19 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-  echo "Usage: $0 --gardener-artifacts-version=<version> --config=<path>"
+  echo "Usage: $0 --gardener-artifacts-version=<version> --config=<path> [extra-go-test-flags...]"
   exit 1
 }
 
 GARDENER_ARTIFACTS_VERSION=""
 CONFIG=""
+EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help)
+      usage
+      ;;
     --gardener-artifacts-version)
       if [[ $# -lt 2 ]]; then
         echo "Error: --gardener-artifacts-version requires a value"
@@ -42,8 +46,8 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Unknown argument: $1"
-      usage
+      EXTRA_ARGS+=("$1")
+      shift
       ;;
   esac
 done
@@ -87,5 +91,7 @@ echo "Version: $GARDENER_ARTIFACTS_VERSION"
 echo "Config: $CONFIG"
 
 go test -v -timeout=65m "${REPO_ROOT}/integration/release/teardown" \
+  -args \
   --gardener-artifacts-version="$GARDENER_ARTIFACTS_VERSION" \
-  --release-configuration-file-path="$CONFIG"
+  --release-configuration-file-path="$CONFIG" \
+  "${EXTRA_ARGS[@]}"
