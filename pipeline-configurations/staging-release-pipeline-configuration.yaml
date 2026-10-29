@@ -64,14 +64,14 @@ gardener:
     version: v1.84.0
   csiImages:
     csiDriver:
-      repository: gardener-harbor-sapbtp.gdc1.us-west6-a.staging.gpcdemolabs.com/sap-gardener/csi-driver-gdch
-      tag: "v0.0.0-gke.36-abb7721"
+      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/kvcsi-driver-gdch
+      tag: "v0.0.0-gke.45"
     csiProvisioner:
       repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-provisioner
-      tag: "v5.2.0-gke.20"
+      tag: "v6.0.1-gdcag.9"
     csiAttacher:
       repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-attacher
-      tag: "v4.8.1-gke.10"
+      tag: "v4.8.1-gdcag.8"
     csiLivenessProbe:
       repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/livenessprobe
       tag: "v2.9.0-gke.1"
@@ -80,10 +80,10 @@ gardener:
       tag: "v2.13.0-gke.21"
     csiSnapshotter:
       repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-snapshotter
-      tag: "v8.2.1-gke.9"
+      tag: "v8.2.1-gdcag.10"
     csiSnapshotController:
       repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/anthos-baremetal-release/snapshot-controller
-      tag: "v8.2.1-gke.9"
+      tag: "v8.5.0-gke.30"
     csiResizer:
       repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-resizer
-      tag: "v1.13.2-gke.14"
+      tag: "v1.13.2-gdcag.7"
