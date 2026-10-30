@@ -47,20 +47,31 @@ const (
 
 // newShootSpec constructs the spec for the Shoot cluster using the provided configuration.
 func newShootSpec(t *testing.T, cfg *config.ReleaseTestConfig, shootName, parentSubnetName, shootNodeCIDR string, workerPoolMinimum, workerPoolMaximum int32) gardencorev1beta1.ShootSpec {
-	t.Logf("Creating Shoot spec for %s on Gardener-GDC with zones: %v (worker pool minimum=%d, maximum=%d)", shootName, cfg.GDC.Zones, workerPoolMinimum, workerPoolMaximum)
+	t.Logf("Creating Shoot spec for %s on Gardener-GDC with zones: %v (total shoot minimum=%d, maximum=%d)", shootName, cfg.GDC.Zones, workerPoolMinimum, workerPoolMaximum)
 	var workerPools []gardencorev1beta1.Worker
 	var infraConfigZones []map[string]interface{}
 	shootNodeCIDRs, err := splitCIDR(shootNodeCIDR)
 	if err != nil {
 		t.Fatalf("failed to split CIDR: %v", err)
 	}
+	// Distribute total Shoot minimum and maximum node counts evenly across zones.
+	zoneMinCounts := gardener.DistributeNodesAcrossZones(workerPoolMinimum, len(cfg.GDC.Zones))
+	zoneMaxCounts := gardener.DistributeNodesAcrossZones(workerPoolMaximum, len(cfg.GDC.Zones))
 	for i, zone := range cfg.GDC.Zones {
 		zoneIdentifier := string(zone[len(zone)-1])
-		t.Logf("Adding worker pool %s for zone %s", fmt.Sprintf("%s-%s", "pool-", zoneIdentifier), zone)
+		poolMin := zoneMinCounts[i]
+		poolMax := zoneMaxCounts[i]
+		if poolMax < poolMin {
+			poolMax = poolMin
+		}
+		if poolMin == 0 && poolMax == 0 {
+			continue
+		}
+		t.Logf("Adding worker pool %s for zone %s (min=%d, max=%d)", fmt.Sprintf("%s-%s", "pool-", zoneIdentifier), zone, poolMin, poolMax)
 		workerPools = append(workerPools, gardencorev1beta1.Worker{
 			Name:    fmt.Sprintf("%s-%s", "pool-", zoneIdentifier),
-			Minimum: workerPoolMinimum,
-			Maximum: workerPoolMaximum,
+			Minimum: poolMin,
+			Maximum: poolMax,
 			Machine: gardencorev1beta1.Machine{
 				Type:         gdcMachineType,
 				Architecture: ptr.To("amd64"),

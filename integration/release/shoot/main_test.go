@@ -52,8 +52,8 @@ var (
 	releaseConfigurationFilePath   = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
 	virtualGardenProvider          = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 	numShoots                      = flag.Int("num-shoots", 1, "The number of Shoot clusters to create")
-	workerPoolMinimum              = flag.Int("worker-pool-minimum", 2, "The minimum number of machines per worker pool")
-	workerPoolMaximum              = flag.Int("worker-pool-maximum", 2, "The maximum number of machines per worker pool")
+	workerPoolMinimum              = flag.Int("worker-pool-minimum", 2, "The minimum number of machines per Shoot cluster")
+	workerPoolMaximum              = flag.Int("worker-pool-maximum", 2, "The maximum number of machines per Shoot cluster")
 )
 
 const (
@@ -100,6 +100,10 @@ func TestCreateShootCluster(t *testing.T) {
 
 	if releasePipelineCfg != nil && releasePipelineCfg.GDCClient != nil {
 		defer releasePipelineCfg.GDCClient.Cleanup()
+	}
+
+	if numZones := len(releasePipelineCfg.GDC.Zones); numZones > 0 && *workerPoolMinimum < numZones {
+		t.Fatalf("--worker-pool-minimum (%d) must be at least the number of configured zones (%d)", *workerPoolMinimum, numZones)
 	}
 
 	ctx := context.Background()

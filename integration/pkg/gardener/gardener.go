@@ -442,6 +442,24 @@ func GetShootParentSubnetNameForIndex(commitHash string, index int) string {
 	return fmt.Sprintf("%s-%d", base, index+1)
 }
 
+// DistributeNodesAcrossZones distributes a Shoot cluster's total node count evenly across its zones.
+// Any remainder (total % numZones) is distributed one node per zone starting from index 0.
+func DistributeNodesAcrossZones(total int32, numZones int) []int32 {
+	if numZones <= 0 {
+		return nil
+	}
+	counts := make([]int32, numZones)
+	base := total / int32(numZones)
+	rem := total % int32(numZones)
+	for i := 0; i < numZones; i++ {
+		counts[i] = base
+		if int32(i) < rem {
+			counts[i]++
+		}
+	}
+	return counts
+}
+
 // GetShootKubeconfigPath retrieves the kubeconfig for a given Shoot cluster,
 // writes it to a temporary file, and returns the path to the file.
 func GetShootKubeconfigPath(ctx context.Context, gardenClient client.Client, shootKey client.ObjectKey) (string, error) {
