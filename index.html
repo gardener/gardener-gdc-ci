@@ -450,11 +450,7 @@
 
         if (isActive) {
           hasActiveRun = true;
-          // The real mode is only known once the run finishes and its results are persisted.
-          // Until then, default to 'snapshot' regardless of trigger: 'snapshot' is the
-          // workflow_dispatch default and the common schedule case, and prematurely labelling
-          // an in-progress run as an official 'release' misleads downstream consumers.
-          const defaultMode = 'snapshot';
+          const defaultMode = wRun.event === 'schedule' ? 'snapshot' : 'release';
           byRunId.set(runId, {
             runId,
             runNumber: String(wRun.run_number),
