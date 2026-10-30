@@ -149,14 +149,29 @@ func scaleAndVerifyShoot(t *testing.T, ctx context.Context, gardenClient client.
 	shootWatchClient := shootClients.WatchClient
 	t.Logf("Attempting to set worker pool[0] min=%d, max=%d (target total nodes=%d)", targetPoolMin, targetPoolMax, targetNodeCount)
 
+	// When scaling down a worker pool whose targetPoolMax > targetPoolMin, temporarily clamp
+	// Maximum to targetPoolMin so Gardener immediately reduces the MachineDeployment replicas
+	// instead of leaving the extra node within [targetPoolMin, targetPoolMax] for Cluster Autoscaler.
+	// Also check shoot.Spec.Provider.Workers[0].Minimum > targetPoolMin inside UpdateShoot so
+	// t.Cleanup recovery clamps Maximum even if Scale Up failed before the new VM registered as a Node.
+	currentNodeCount, countErr := getNodeCount(ctx, shootWatchClient)
+	clampMaxForScaleDown := countErr == nil && currentNodeCount > targetNodeCount && targetPoolMax > targetPoolMin
+
 	t.Logf("Updating Shoot spec in the Garden cluster")
 	err = gardener.UpdateShoot(ctx, gardenClient, shootKey, func(shoot *gardencorev1beta1.Shoot) {
 		if len(shoot.Spec.Provider.Workers) == 0 {
 			t.Fatalf("Shoot %s has no worker pools", shootKey.Name)
 		}
-		t.Logf("Updating worker pool %s to min=%d, max=%d", shoot.Spec.Provider.Workers[0].Name, targetPoolMin, targetPoolMax)
+		if shoot.Spec.Provider.Workers[0].Minimum > targetPoolMin && targetPoolMax > targetPoolMin {
+			clampMaxForScaleDown = true
+		}
+		effectiveMax := targetPoolMax
+		if clampMaxForScaleDown {
+			effectiveMax = targetPoolMin
+		}
+		t.Logf("Updating worker pool %s to min=%d, max=%d", shoot.Spec.Provider.Workers[0].Name, targetPoolMin, effectiveMax)
 		shoot.Spec.Provider.Workers[0].Minimum = targetPoolMin
-		shoot.Spec.Provider.Workers[0].Maximum = targetPoolMax
+		shoot.Spec.Provider.Workers[0].Maximum = effectiveMax
 	})
 	if err != nil {
 		t.Fatalf("failed to update shoot spec for scaling: %v", err)
@@ -173,8 +188,23 @@ func scaleAndVerifyShoot(t *testing.T, ctx context.Context, gardenClient client.
 	if err != nil {
 		t.Fatalf("failed to verify shoot's node count: %v", err)
 	}
-
 	t.Logf("Successfully verified that the Shoot cluster has %d nodes.", targetNodeCount)
+
+	if clampMaxForScaleDown {
+		t.Logf("Restoring worker pool[0] max to %d after scale-down", targetPoolMax)
+		err = gardener.UpdateShoot(ctx, gardenClient, shootKey, func(shoot *gardencorev1beta1.Shoot) {
+			if len(shoot.Spec.Provider.Workers) == 0 {
+				return
+			}
+			shoot.Spec.Provider.Workers[0].Minimum = targetPoolMin
+			shoot.Spec.Provider.Workers[0].Maximum = targetPoolMax
+		})
+		if err != nil {
+			t.Errorf("post-scale-down restore: failed to restore worker pool[0] maximum to %d (scale-down to %d nodes already verified): %v", targetPoolMax, targetNodeCount, err)
+		} else if err := gardener.WaitForShootReconciliation(ctx, gardenClient, shootKey, waitForReconciliationTimeout); err != nil {
+			t.Errorf("post-scale-down restore: shoot reconciliation failed after restoring worker pool[0] maximum to %d (scale-down to %d nodes already verified): %v", targetPoolMax, targetNodeCount, err)
+		}
+	}
 }
 
 func waitForNodeCount(t *testing.T, ctx context.Context, shootClient client.WithWatch, targetCount int32, timeout time.Duration) error {
