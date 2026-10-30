@@ -51,6 +51,7 @@ var (
 	externalDNSManagementImageName = flag.String("external-dns-management-image-name", "external-dnsman2-gdch", "The name of the external DNS management image")
 	releaseConfigurationFilePath   = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
 	virtualGardenProvider          = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
+	subnetPrefixLength             = flag.Int("subnet-prefix-length", defaultSubnetPrefixLength, "The prefix length for the Shoot parent subnet (default /27 preserves 32 IPs in a /26 parent subnet group for Stage 6 LoadBalancer /31 allocations)")
 	numShoots                      = flag.Int("num-shoots", 1, "The number of Shoot clusters to create")
 	workerPoolMinimum              = flag.Int("worker-pool-minimum", 2, "The minimum number of machines per Shoot cluster")
 	workerPoolMaximum              = flag.Int("worker-pool-maximum", 2, "The maximum number of machines per Shoot cluster")
@@ -68,7 +69,7 @@ const (
 	cdiBindImmediateRequestedAnnotation = "cdi.kubevirt.io/storage.bind.immediate.requested"
 	selectedNodeAnnotationKey           = "volume.kubernetes.io/selected-node"
 	stuckEtcdMountRecoveryThreshold     = 3 * time.Minute
-	// subnetPrefixLength is set to /27 (32 IPs).
+	// defaultSubnetPrefixLength is set to /27 (32 IPs).
 	// Rationale for /27:
 	// 1. Capacity: A /27 subnet provides 32 IPs, which splitCIDR divides into /28 (16 IPs)
 	//    per zone. This is plenty for the test worker VM pools (typically 3 nodes).
@@ -80,7 +81,10 @@ const (
 	//   dynamically request branch subnets (such as /31 for ILBs) from the same parent pool.
 	// - With /26, IPAM failed with "No resource could allocate a /31 CIDR", causing LB IP
 	//   allocation timeouts and cascading test failures.
-	subnetPrefixLength        = 27
+	defaultSubnetPrefixLength = 27
+	minSubnetPrefixLength     = 16
+	maxSubnetPrefixLength     = 28
+	maxZoneSubnetPrefixLength = 29
 	maxNumShoots              = 64
 	waitForSubnetReadyTimeout = 5 * time.Minute
 )
@@ -107,6 +111,17 @@ func TestCreateShootCluster(t *testing.T) {
 	}
 
 	ctx := context.Background()
+
+	if numZones := len(releasePipelineCfg.GDC.Zones); numZones > 0 {
+		zoneSplitBits := 1
+		if numZones > 1 {
+			zoneSplitBits = 2
+		}
+		if *subnetPrefixLength+zoneSplitBits > maxZoneSubnetPrefixLength {
+			t.Fatalf("--subnet-prefix-length /%d splits into /%d across %d zones, which is smaller than the minimum per-zone /%d",
+				*subnetPrefixLength, *subnetPrefixLength+zoneSplitBits, numZones, maxZoneSubnetPrefixLength)
+		}
+	}
 
 	// Create Image Pull Secret
 	gardenClient := releasePipelineCfg.TestShoot.VirtualGarden.Client
@@ -152,7 +167,7 @@ func TestCreateShootCluster(t *testing.T) {
 	watchCtx, cancelWatch := context.WithCancel(ctx)
 	defer cancelWatch()
 
-	if err := subnet.ValidateParentSubnetGroupCapacity(ctx, releasePipelineCfg.GlobalAPIClient, releasePipelineCfg.GDC.Project, releasePipelineCfg.GDC.ParentPrivateSubnetGroup, *numShoots, subnetPrefixLength); err != nil {
+	if err := subnet.ValidateParentSubnetGroupCapacity(ctx, releasePipelineCfg.GlobalAPIClient, releasePipelineCfg.GDC.Project, releasePipelineCfg.GDC.ParentPrivateSubnetGroup, *numShoots, *subnetPrefixLength); err != nil {
 		t.Fatalf("invalid parent subnet group capacity: %v", err)
 	}
 
@@ -166,7 +181,7 @@ func TestCreateShootCluster(t *testing.T) {
 			Namespace:         releasePipelineCfg.GDC.Project,
 			Name:              subnetName,
 			ParentSubnetGroup: releasePipelineCfg.GDC.ParentPrivateSubnetGroup,
-			PrefixLength:      subnetPrefixLength,
+			PrefixLength:      int32(*subnetPrefixLength),
 		}, waitForSubnetReadyTimeout, t)
 		if err != nil {
 			t.Fatalf("failed to ensure subnet %s: %v", subnetName, err)
@@ -485,6 +500,9 @@ func validateFlags(t *testing.T) error {
 
 	if *numShoots <= 0 || *numShoots > maxNumShoots {
 		t.Fatalf("--num-shoots must be between 1 and %d, got %d", maxNumShoots, *numShoots)
+	}
+	if *subnetPrefixLength < minSubnetPrefixLength || *subnetPrefixLength > maxSubnetPrefixLength {
+		t.Fatalf("--subnet-prefix-length must be between %d and %d, got %d", minSubnetPrefixLength, maxSubnetPrefixLength, *subnetPrefixLength)
 	}
 	if *workerPoolMinimum <= 0 {
 		t.Fatalf("--worker-pool-minimum must be greater than 0, got %d", *workerPoolMinimum)
