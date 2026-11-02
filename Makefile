@@ -87,6 +87,7 @@ FORCE:
 test: unittests
 unittests:
 	@go test -race -timeout=3m ./integration/pkg/...
+	@go test -race -timeout=1m -run '^TestPrepareGardenletHelmValues$$' ./integration/release/seed
 	@python3 ./scripts/release/helpers/generate_release_notes_test.py
 	@python3 ./scripts/release/helpers/generate_component_descriptor_fragments_test.py
 
