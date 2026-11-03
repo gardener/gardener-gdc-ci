@@ -185,7 +185,7 @@ jq --argjson entry "${NEW_ENTRY}" '[$entry] + map(select(.runId != $entry.runId)
 mv "${DASHBOARD_DATA_FILE}.tmp" "${DASHBOARD_DATA_FILE}"
 
 # Publish updated dashboard and runs.json to gh-pages branch when running on main
-if [[ "${GITHUB_REF:-}" == "refs/heads/main" && -z "${PR_NUMBER:-}" && -n "${GH_TOKEN:-}" ]]; then
+if [[ "${GITHUB_REF:-}" == "refs/heads/main" && -n "${GH_TOKEN:-}" ]]; then
   PAGES_WORK_DIR="$(mktemp -d)"
   if git clone --branch gh-pages "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY:-gardener/gardener-gdc-ci}.git" "${PAGES_WORK_DIR}" >/dev/null 2>&1; then
     cp -r "${REPO_ROOT}/dashboard/"* "${PAGES_WORK_DIR}/"
@@ -246,10 +246,6 @@ EOF
 | 8. Promote Certified Artifacts to Public Registry | \`${STAGE_PUBLISH}\` |
 | 9. Publish OCM Component Descriptor | \`${STAGE_OCM}\` |
 EOF
-fi
-
-if [[ "${DASHBOARD_SKIP_SUMMARY:-false}" != "true" ]]; then
-  complete_pr_check_run "${OVERALL_STATUS}"
 fi
 
 echo "Dashboard data updated at ${DASHBOARD_DATA_FILE}."

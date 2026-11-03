@@ -10,14 +10,11 @@ on:
   # the official SemVer release and no separate snapshot runs that day; otherwise it is the nightly snapshot.
   schedule:
     - cron: '0 10 * * 1-5'
-  # Allow authorized maintainers to trigger on Pull Requests via '/test-release' comment
-  issue_comment:
-    types: [created]
-  # Allow manual trigger by approved Google and SAP maintainers only
+  # Allow manual trigger from main by approved Google and SAP maintainers only
   workflow_dispatch:
     inputs:
       release_mode:
-        description: 'Pipeline execution mode (snapshot for pre-release/nightly, release for official SemVer release)'
+        description: 'Pipeline execution mode (snapshot for pre-release/nightly, release for official SemVer release; must be run from main)'
         required: false
         default: 'snapshot'
         type: choice
@@ -34,11 +31,6 @@ on:
           - bump-minor
           - bump-major
           - noop
-      pr_number:
-        description: 'Optional Pull Request number to test (merges main into PR branch and reports check-run on PR)'
-        required: false
-        default: ''
-        type: string
       extension_gdc_ref:
         description: 'Git ref (branch/tag/SHA) for gardener/gardener-extension-provider-gdc'
         required: false
@@ -75,38 +67,30 @@ permissions:
   packages: write
   pages: write
   id-token: write
-  checks: write
-  issues: write
-  pull-requests: read
 
 concurrency:
-  group: gardener-gdc-release-pipeline-${{ inputs.pr_number || github.event.issue.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'issue_comment' || inputs.pr_number != '' }}
+  group: gardener-gdc-release-pipeline-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   authorize:
     name: Authorize Trigger (Google & SAP Maintainers)
-    if: >
-      github.event_name != 'issue_comment' ||
-      (github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '/test-release'))
+    # Only merged code on main reaches the shared GDC staging environment: no pull request triggers.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.auth.outputs.should_run }}
-      pr_number: ${{ steps.auth.outputs.pr_number }}
       # Resolved execution mode. Set by the schedule path ('release' on biweekly Wednesdays, else 'snapshot');
-      # empty for manual and PR-comment triggers, which derive the mode from their inputs below.
+      # empty for manual triggers, which derive the mode from inputs.release_mode below.
       release_mode: ${{ steps.auth.outputs.release_mode }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Verify maintainer authorization on manual dispatch or PR comment
+      - name: Verify maintainer authorization on manual dispatch
         id: auth
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           source ./scripts/ci-common.sh
           verify_authorized_maintainer OWNERS_ALIASES
 
@@ -123,8 +107,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GDC_RELEASE_GITHUB_TOKEN: ${{ secrets.GDC_RELEASE_GITHUB_TOKEN }}
-      PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-      RELEASE_MODE: ${{ (needs.authorize.outputs.release_mode == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'release') || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/test-release release'))) && 'release' || 'snapshot' }}
+      RELEASE_MODE: ${{ (needs.authorize.outputs.release_mode == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'release')) && 'release' || 'snapshot' }}
       NEXT_VERSION: ${{ inputs.next_version || 'bump-patch' }}
       EXTENSION_GDC_REF: ${{ inputs.extension_gdc_ref || 'main' }}
       MCM_PROVIDER_GDC_REF: ${{ inputs.mcm_provider_gdc_ref || 'main' }}
@@ -141,12 +124,6 @@ jobs:
 
       - name: Record Pipeline Start Time
         run: echo "PIPELINE_START_EPOCH=$(date -u +%s)" >> "${GITHUB_ENV}"
-
-      - name: Checkout target Pull Request if requested
-        if: env.PR_NUMBER != ''
-        run: |
-          source ./scripts/ci-common.sh
-          checkout_pr_if_requested
 
       - name: Set up Go
         uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
@@ -217,14 +194,14 @@ jobs:
 
       - name: Determine Gardener OCI Registry Parameters
         id: gardener_params
-        if: success() && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
+        if: success() && (github.event_name == 'schedule' || inputs.publish_to_public_registry == true)
         uses: gardener/cc-utils/.github/actions/params@v1
         with:
           mode: ${{ env.RELEASE_MODE }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Authenticate to Gardener Public Registry (OIDC via gardener/cc-utils)
-        if: success() && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
+        if: success() && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || inputs.publish_to_public_registry == true)
         uses: gardener/cc-utils/.github/actions/oci-auth@v1
         with:
           oci-image-reference: ${{ steps.gardener_params.outputs.oci-registry }},ghcr.io/gardener
@@ -232,14 +209,14 @@ jobs:
 
       - name: Stage 8 - Promote Certified Artifacts to Gardener Public Registry
         id: stage_publish
-        if: success() && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
+        if: success() && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || inputs.publish_to_public_registry == true)
         env:
           PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry }}/gardener/gardener-gdc-ci
         run: ./scripts/release/8-publish_release_artifacts.sh
 
       - name: Stage 9 - Prepare OCM Component Descriptor Fragments
         id: ocm_inputs
-        if: success() && steps.stage_publish.outcome == 'success' && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.publish_to_public_registry == true)
+        if: success() && steps.stage_publish.outcome == 'success' && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || inputs.publish_to_public_registry == true)
         env:
           RELEASE_METADATA_FILE: /tmp/gardener-gdc-release/release-metadata.yaml
           CERTIFIED_RELEASE_MANIFEST: /tmp/gardener-gdc-release/artifacts/certified-release-manifest.json

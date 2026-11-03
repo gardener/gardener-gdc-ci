@@ -29,26 +29,19 @@ Each pipeline run executes the following end-to-end qualification flow:
 
 ## How to Trigger the Pipeline
 
-The **[Gardener GDC Release Pipeline](https://github.com/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml)** runs automatically on a schedule and can also be triggered on demand by approved Google and SAP maintainers listed in [`OWNERS_ALIASES`](OWNERS_ALIASES) / [`CODEOWNERS`](CODEOWNERS).
+The **[Gardener GDC Release Pipeline](https://github.com/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml)** runs only on merged code on `main` (the `gdc-staging` environment is restricted to `main`; Pull Requests are validated by the `CI` workflow). It runs automatically on a schedule and can also be triggered on demand from `main` by approved Google and SAP maintainers listed in [`OWNERS_ALIASES`](OWNERS_ALIASES) / [`CODEOWNERS`](CODEOWNERS).
 
 ### 1. Automated Schedules
 - **Nightly Snapshot (`snapshot` mode)**: Runs automatically every weeknight (**Monday–Friday at `02:00 PST` / `10:00 UTC`**) against the default branches of all component repositories.
 - **Biweekly Official Release (`release` mode)**: Uses the **same `02:00 PST` schedule once every two weeks on Wednesday** (even Unix epoch weeks) with `next_version=bump-patch`. On that Wednesday the scheduled run *is* the release — no separate snapshot runs that day, so the two never compete for GDC staging.
 
-### 2. Pull Request Comment (`/test-release`)
-To run the full E2E pipeline against an open Pull Request in `gardener/gardener-gdc-ci`, comment on the PR:
-```text
-/test-release
-```
-
-### 3. GitHub Actions UI (`workflow_dispatch`)
-Navigate to **[Actions → Gardener GDC Release Pipeline](https://github.com/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml)**, click **Run workflow**, and configure the desired inputs:
+### 2. GitHub Actions UI (`workflow_dispatch`)
+Navigate to **[Actions → Gardener GDC Release Pipeline](https://github.com/gardener/gardener-gdc-ci/actions/workflows/release-pipeline.yaml)**, click **Run workflow** on branch `main`, and configure the desired inputs:
 
 | Input | Default | Description |
 | :--- | :--- | :--- |
-| `release_mode` | `snapshot` | Execution mode: `snapshot` (nightly/pre-release) or `release` (official SemVer release) |
+| `release_mode` | `snapshot` | Execution mode: `snapshot` (nightly/pre-release) or `release` (official SemVer release). Must be run from `main`. |
 | `next_version` | `bump-patch` | Next `-dev` version bump after a successful official release (`bump-patch`, `bump-minor`, `bump-major`, or `noop`) |
-| `pr_number` | `""` | Optional Pull Request number in `gardener-gdc-ci` to test |
 | `extension_gdc_ref` | `main` | Git ref (branch, tag, or SHA) for `gardener/gardener-extension-provider-gdc` |
 | `mcm_provider_gdc_ref` | `main` | Git ref (branch, tag, or SHA) for `gardener/machine-controller-manager-provider-gdc` |
 | `external_dns_ref` | `master` | Git ref (branch, tag, or SHA) for `gardener/external-dns-management` |
@@ -56,7 +49,7 @@ Navigate to **[Actions → Gardener GDC Release Pipeline](https://github.com/gar
 | `skip_conformance` | `false` | Skip the Sonobuoy CNCF conformance suite for faster validation runs |
 | `publish_to_public_registry` | `true` | Publish certified artifacts to the Gardener registry on success |
 
-### 4. GitHub CLI (`gh`)
+### 3. GitHub CLI (`gh`)
 ```bash
 # Trigger a snapshot qualification run
 gh workflow run release-pipeline.yaml \
@@ -70,12 +63,6 @@ gh workflow run release-pipeline.yaml \
   --ref main \
   -f release_mode=release \
   -f next_version=bump-patch
-
-# Trigger a run for a specific Pull Request
-gh workflow run release-pipeline.yaml \
-  --repo gardener/gardener-gdc-ci \
-  --ref main \
-  -f pr_number=<PR_NUMBER>
 ```
 
 ---
@@ -92,7 +79,7 @@ gh workflow run release-pipeline.yaml \
 
 Artifact versions are derived from the root `VERSION` file in each component repository (`v0.5.3-dev` in the GDC repositories; `v0.53.0-dev` in `external-dns-management`):
 
-- **`snapshot` Mode (Nightly / PR / Pre-Release):**
+- **`snapshot` Mode (Nightly / Pre-Release):**
   - Uses `<VERSION>-<short_sha>` (for example, `v0.5.3-dev-8e432a2`, and `0.5.3-dev-8e432a2` with the leading `v` stripped for Helm charts).
   - Publishes to **`europe-docker.pkg.dev/gardener-project/snapshots/gardener/gardener-gdc-ci`**.
 - **`release` Mode (Official Release):**
