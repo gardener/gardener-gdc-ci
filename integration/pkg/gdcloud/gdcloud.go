@@ -18,9 +18,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+const systemCABundlePath = "/etc/ssl/certs/ca-certificates.crt"
 
 var gdcloudLocation = func() string {
 	if loc := os.Getenv("GDCLOUD_PATH"); loc != "" {
@@ -32,7 +35,8 @@ var gdcloudLocation = func() string {
 // TestingClient provides a hermetic wrapper around the gdcloud CLI.
 // It manages an isolated execution environment for safe concurrent testing.
 type TestingClient struct {
-	configDir string
+	configDir  string
+	caDataPath string
 }
 
 // ConfigDir returns the path to the hermetic configuration directory managed by this client.
@@ -56,8 +60,19 @@ func NewTestingClient(caDataPath, serviceaccountPath string, consoleURL string) 
 		}
 	}()
 
-	c := &TestingClient{configDir: configDir}
+	caBundlePath := buildCABundle(configDir, caDataPath)
+	if caBundlePath != "" {
+		_ = os.Setenv("SSL_CERT_FILE", caBundlePath)
+	}
 
+	c := &TestingClient{
+		configDir:  configDir,
+		caDataPath: caBundlePath,
+	}
+
+	if result, err := c.Exec("config", "set", "core/disable_prompts", "true"); err != nil {
+		return nil, fmt.Errorf("%s, cannot execute gdcloud command: %w", result, err)
+	}
 	if result, err := c.Exec("config", "set", "auth/login_config_cert_path", caDataPath); err != nil {
 		return nil, fmt.Errorf("%s, cannot execute gdcloud command: %w", result, err)
 	}
@@ -68,6 +83,34 @@ func NewTestingClient(caDataPath, serviceaccountPath string, consoleURL string) 
 		return nil, fmt.Errorf("%s, cannot execute gdcloud command: %w", result, err)
 	}
 	return c, nil
+}
+
+// buildCABundle combines the system CA bundle (if present) with the GDC CA certificate at caDataPath
+// so that SSL_CERT_FILE trusts both standard public CAs and the GDC environment's private Root CA
+// (e.g., when gdcloud auto-downloads gdcloud-iam-plugin from the GDC Harbor registry).
+func buildCABundle(configDir, caDataPath string) string {
+	if caDataPath == "" {
+		return ""
+	}
+	gdcCA, err := os.ReadFile(caDataPath)
+	if err != nil {
+		return caDataPath
+	}
+
+	var combined []byte
+	if sysCA, err := os.ReadFile(systemCABundlePath); err == nil && len(sysCA) > 0 {
+		combined = append(combined, sysCA...)
+		if combined[len(combined)-1] != '\n' {
+			combined = append(combined, '\n')
+		}
+	}
+	combined = append(combined, gdcCA...)
+
+	bundlePath := filepath.Join(configDir, "ca-bundle.crt")
+	if err := os.WriteFile(bundlePath, combined, 0600); err != nil {
+		return caDataPath
+	}
+	return bundlePath
 }
 
 // Cleanup removes the temporary configuration directory used by the testing client.
@@ -105,6 +148,9 @@ func (c *TestingClient) Exec(args ...string) ([]byte, error) {
 			"HOME="+c.configDir,
 			"XDG_CONFIG_HOME="+c.configDir,
 		)
+		if c.caDataPath != "" {
+			cmd.Env = append(cmd.Env, "SSL_CERT_FILE="+c.caDataPath)
+		}
 
 		result, err = cmd.CombinedOutput()
 		if err == nil {

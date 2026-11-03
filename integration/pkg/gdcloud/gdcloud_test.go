@@ -16,6 +16,8 @@ package gdcloud
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -68,5 +70,57 @@ func TestExec(t *testing.T) {
 				t.Errorf("Exec() gotOutput = %q, want %q", gotOutput, tt.wantOutput)
 			}
 		})
+	}
+}
+
+func TestNewTestingClient(t *testing.T) {
+	t.Setenv("SSL_CERT_FILE", os.Getenv("SSL_CERT_FILE"))
+	tmpDir := t.TempDir()
+	caFile := filepath.Join(tmpDir, "gdc-ca.pem")
+	wantCAContent := "-----BEGIN CERTIFICATE-----\nFAKE-GDC-CA\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(caFile, []byte(wantCAContent), 0600); err != nil {
+		t.Fatalf("failed to write fake CA file: %v", err)
+	}
+
+	logFile := filepath.Join(tmpDir, "gdcloud-calls.log")
+	mockScript := filepath.Join(tmpDir, "mock-gdcloud.sh")
+	scriptContent := "#!/bin/sh\necho \"SSL_CERT_FILE=${SSL_CERT_FILE} ARGS=$*\" >> \"" + logFile + "\"\n"
+	if err := os.WriteFile(mockScript, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("failed to write mock gdcloud script: %v", err)
+	}
+
+	originalLocationFunc := gdcloudLocation
+	gdcloudLocation = func() string { return mockScript }
+	defer func() { gdcloudLocation = originalLocationFunc }()
+
+	client, err := NewTestingClient(caFile, "/tmp/fake-sa.json", "https://console.example.com")
+	if err != nil {
+		t.Fatalf("NewTestingClient() unexpected error: %v", err)
+	}
+	defer client.Cleanup()
+
+	bundleContent, err := os.ReadFile(client.caDataPath)
+	if err != nil {
+		t.Fatalf("failed to read generated CA bundle %q: %v", client.caDataPath, err)
+	}
+	if !strings.Contains(string(bundleContent), wantCAContent) {
+		t.Errorf("CA bundle %q missing GDC CA content", client.caDataPath)
+	}
+
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("failed to read gdcloud calls log: %v", err)
+	}
+	gotLog := string(logBytes)
+	wantCalls := []string{
+		"SSL_CERT_FILE=" + client.caDataPath + " ARGS=config set core/disable_prompts true",
+		"SSL_CERT_FILE=" + client.caDataPath + " ARGS=config set auth/login_config_cert_path " + caFile,
+		"SSL_CERT_FILE=" + client.caDataPath + " ARGS=config set core/organization_console_url https://console.example.com",
+		"SSL_CERT_FILE=" + client.caDataPath + " ARGS=auth activate-service-account --key-file=/tmp/fake-sa.json",
+	}
+	for _, want := range wantCalls {
+		if !strings.Contains(gotLog, want) {
+			t.Errorf("NewTestingClient() missing expected call %q in log:\n%s", want, gotLog)
+		}
 	}
 }
