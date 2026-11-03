@@ -5,11 +5,12 @@
 
 set -euo pipefail
 
-# verify_authorized_maintainer ensures that workflow_dispatch and /test-release issue_comment runs
-# can only be triggered by approved Google and SAP maintainers listed in OWNERS_ALIASES, and
-# resolves the execution mode for the single weekday schedule ('0 10 * * 1-5', 02:00 PST):
-# on a biweekly release Wednesday (even Unix epoch week) the run is the official release and no
-# separate snapshot runs that day; on every other weekday it is the nightly snapshot.
+# verify_authorized_maintainer ensures that workflow_dispatch runs execute only from 'main' and
+# can only be triggered by approved Google and SAP maintainers listed in OWNERS_ALIASES (as
+# committed on origin/main when available), and resolves the execution mode for the single
+# weekday schedule ('0 10 * * 1-5', 02:00 PST): on a biweekly release Wednesday (even Unix epoch
+# week) the run is the official release and no separate snapshot runs that day; on every other
+# weekday it is the nightly snapshot.
 verify_authorized_maintainer() {
   local owners_file="${1:-OWNERS_ALIASES}"
   if [[ "${GITHUB_EVENT_NAME:-}" == "schedule" ]]; then
@@ -28,142 +29,44 @@ verify_authorized_maintainer() {
     fi
   fi
 
-  if [[ "${GITHUB_EVENT_NAME:-}" != "workflow_dispatch" && "${GITHUB_EVENT_NAME:-}" != "issue_comment" && "${GITHUB_EVENT_NAME:-}" != "pull_request" ]]; then
+  if [[ "${GITHUB_EVENT_NAME:-}" != "workflow_dispatch" ]]; then
     echo "Trigger event is '${GITHUB_EVENT_NAME:-local}'; maintainer check not required."
     if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
       echo "should_run=true" >> "${GITHUB_OUTPUT}"
-      echo "pr_number=${PR_NUMBER:-}" >> "${GITHUB_OUTPUT}"
     fi
     return 0
   fi
 
-  local actor="${GITHUB_ACTOR:-}"
-  if [[ "${GITHUB_EVENT_NAME:-}" == "issue_comment" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
-    local is_pr comment_body
-    is_pr="$(jq -r '.issue.pull_request.url // empty' "${GITHUB_EVENT_PATH}")"
-    comment_body="$(jq -r '.comment.body // empty' "${GITHUB_EVENT_PATH}")"
-    actor="$(jq -r '.comment.user.login // empty' "${GITHUB_EVENT_PATH}")"
-    PR_NUMBER="$(jq -r '.issue.number // empty' "${GITHUB_EVENT_PATH}")"
-    export PR_NUMBER
-
-    if [[ -z "${is_pr}" ]] || ! printf '%s\n' "${comment_body}" | tr -d '\r' | grep -Eq '^[[:space:]]*/test-release([[:space:]]|$)'; then
-      echo "Comment does not contain a '/test-release' command line on a pull request. Skipping."
-      if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-        echo "should_run=false" >> "${GITHUB_OUTPUT}"
-      fi
-      return 0
-    fi
+  if [[ "${GITHUB_REF_NAME:-}" != "main" ]]; then
+    echo "::error::The release pipeline only runs merged code; run it from 'main' (got '${GITHUB_REF_NAME:-}')." >&2
+    exit 1
   fi
 
+  local actor="${GITHUB_ACTOR:-}"
   if [[ -z "${actor}" ]]; then
     echo "::error::GITHUB_ACTOR is empty on ${GITHUB_EVENT_NAME:-unknown}." >&2
     exit 1
   fi
 
-  if ! grep -E "^[[:space:]]*-[[:space:]]*${actor}[[:space:]]*$" "${owners_file}" >/dev/null 2>&1; then
-    echo "::error::Unauthorized user @${actor}. Only approved Google and SAP maintainers listed in ${owners_file} may trigger the release pipeline." >&2
+  local owners_content=""
+  if git rev-parse --verify --quiet "origin/main:${owners_file}" >/dev/null 2>&1; then
+    owners_content="$(git show "origin/main:${owners_file}")"
+  elif [[ -f "${owners_file}" ]]; then
+    owners_content="$(cat "${owners_file}")"
+  else
+    echo "::error::Owners file '${owners_file}' not found." >&2
+    exit 1
+  fi
+
+  if ! printf '%s\n' "${owners_content}" | grep -E "^[[:space:]]*-[[:space:]]*${actor}[[:space:]]*$" >/dev/null 2>&1; then
+    echo "::error::Unauthorized user @${actor}. Only approved Google and SAP maintainers listed in ${owners_file} on main may trigger the release pipeline." >&2
     exit 1
   fi
 
   echo "Authorized maintainer @${actor} verified via ${owners_file}."
 
-  if [[ "${GITHUB_EVENT_NAME:-}" == "issue_comment" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
-    local comment_id
-    comment_id="$(jq -r '.comment.id // empty' "${GITHUB_EVENT_PATH}")"
-    if [[ -n "${comment_id}" && -n "${GH_TOKEN:-}" && -n "${GITHUB_REPOSITORY:-}" ]]; then
-      gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}/reactions" \
-        -f content='rocket' >/dev/null 2>&1 || true
-    fi
-  fi
-
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "should_run=true" >> "${GITHUB_OUTPUT}"
-    echo "pr_number=${PR_NUMBER:-}" >> "${GITHUB_OUTPUT}"
-  fi
-}
-
-# start_pr_check_run creates an in_progress GitHub Check Run on PR_HEAD_SHA when
-# triggered via '/test-release' or workflow_dispatch with pr_number.
-start_pr_check_run() {
-  local check_name="${1:-E2E Release Certification & Promotion}"
-  if [[ -z "${PR_HEAD_SHA:-}" || -z "${GH_TOKEN:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
-    return 0
-  fi
-
-  local run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-}"
-  echo "Creating check-run '${check_name}' on PR #${PR_NUMBER:-} commit ${PR_HEAD_SHA}..."
-  PR_CHECK_RUN_ID="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" \
-    -f name="${check_name}" \
-    -f head_sha="${PR_HEAD_SHA}" \
-    -f status="in_progress" \
-    -f details_url="${run_url}" \
-    -f "output[title]=Running via ${GITHUB_EVENT_NAME:-manual trigger}" \
-    -f "output[summary]=Triggered by @${GITHUB_ACTOR:-maintainer} (${GITHUB_EVENT_NAME:-manual}) for PR #${PR_NUMBER:-} (${run_url})." \
-    --jq '.id' 2>/dev/null || true)"
-  export PR_CHECK_RUN_ID
-}
-
-# complete_pr_check_run updates the GitHub Check Run on PR_HEAD_SHA with the final conclusion.
-complete_pr_check_run() {
-  local status_str="${1:-failure}"
-  if [[ -z "${PR_CHECK_RUN_ID:-}" || -z "${GH_TOKEN:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
-    return 0
-  fi
-
-  local conclusion="failure"
-  local title="Release pipeline failed"
-  if [[ "${status_str}" == "success" ]]; then
-    conclusion="success"
-    title="Release pipeline passed"
-  elif [[ "${status_str}" == "cancelled" ]]; then
-    conclusion="cancelled"
-    title="Release pipeline cancelled"
-  fi
-
-  local run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-}"
-  echo "Updating check-run ${PR_CHECK_RUN_ID} on PR #${PR_NUMBER:-} with conclusion=${conclusion}..."
-  gh api --method PATCH "repos/${GITHUB_REPOSITORY}/check-runs/${PR_CHECK_RUN_ID}" \
-    -f status="completed" \
-    -f conclusion="${conclusion}" \
-    -f details_url="${run_url}" \
-    -f "output[title]=${title}" \
-    -f "output[summary]=Manual ${GITHUB_EVENT_NAME:-workflow_dispatch} run completed with ${conclusion} (${run_url})." >/dev/null 2>&1 || \
-    echo "Warning: Failed to update check-run ${PR_CHECK_RUN_ID} on PR #${PR_NUMBER:-}."
-}
-
-# checkout_pr_if_requested fetches and checks out PR_NUMBER, merges origin/main,
-# and starts a GitHub Check Run on the PR's head SHA.
-checkout_pr_if_requested() {
-  if [[ -z "${PR_NUMBER:-}" ]]; then
-    return 0
-  fi
-
-  git fetch origin main
-  local base_branch_sha
-  base_branch_sha="$(git rev-parse origin/main)"
-
-  echo "Fetching and checking out PR #${PR_NUMBER}..."
-  git fetch origin "pull/${PR_NUMBER}/head:pr-${PR_NUMBER}"
-  PR_HEAD_SHA="$(git rev-parse "pr-${PR_NUMBER}")"
-  export PR_HEAD_SHA
-
-  start_pr_check_run "${CHECK_NAME:-E2E Release Certification & Promotion}"
-
-  git checkout "pr-${PR_NUMBER}"
-  echo "Merging base branch (${base_branch_sha:0:7}) into PR #${PR_NUMBER} (${PR_HEAD_SHA:0:7})..."
-  if ! git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
-    merge --no-edit "${base_branch_sha}"; then
-    echo "::error::Failed to merge base branch (${base_branch_sha:0:7}) into PR #${PR_NUMBER} (${PR_HEAD_SHA:0:7}). Please rebase the PR onto main."
-    complete_pr_check_run "failure"
-    exit 1
-  fi
-
-  if [[ -n "${GITHUB_ENV:-}" ]]; then
-    {
-      echo "PR_NUMBER=${PR_NUMBER}"
-      echo "PR_HEAD_SHA=${PR_HEAD_SHA}"
-      [[ -n "${PR_CHECK_RUN_ID:-}" ]] && echo "PR_CHECK_RUN_ID=${PR_CHECK_RUN_ID}"
-    } >> "${GITHUB_ENV}"
   fi
 }
 
@@ -254,7 +157,7 @@ setup_gdc_credentials() {
   fi
 
   if [[ ! -s "${sa_file}" ]]; then
-    echo "::error::GDC Service Account key is required (file '${sa_file}' is missing or empty). Verify that GDC_RELEASE_SERVICE_ACCOUNT_KEY is configured in repository secrets." >&2
+    echo "::error::GDC Service Account key is required (file '${sa_file}' is missing or empty). Verify that GDC_RELEASE_SERVICE_ACCOUNT_KEY is configured in the gdc-staging environment secrets." >&2
     exit 1
   fi
 
