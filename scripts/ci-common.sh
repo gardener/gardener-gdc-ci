@@ -178,9 +178,18 @@ install_gdcloud_cli() {
   local gdcloud_version="${4:-}"
   local token_helper_bin="${5:-./bin/token-helper}"
 
+  local sudo_cmd=""
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+    sudo_cmd="sudo"
+  fi
+
   local gdcloud_root="/usr/local/bin/google-distributed-cloud-hosted-cli"
   if [[ -x "${gdcloud_root}/bin/gdcloud" && -x "${gdcloud_root}/bin/gdcloud-k8s-auth-plugin" ]]; then
     echo "gdcloud CLI already installed at ${gdcloud_root}/bin/gdcloud"
+    if [[ ! -d "${gdcloud_root}/plugins" || ! -w "${gdcloud_root}/plugins" ]]; then
+      ${sudo_cmd} mkdir -p "${gdcloud_root}/plugins"
+      ${sudo_cmd} chmod 0777 "${gdcloud_root}/plugins"
+    fi
     export PATH="${gdcloud_root}/bin:${PATH}"
     export GDCLOUD_PATH="${gdcloud_root}/bin/gdcloud"
     if [[ -n "${GITHUB_PATH:-}" ]]; then
@@ -229,14 +238,11 @@ install_gdcloud_cli() {
   echo "Downloading gdcloud CLI from ${serving_url}..."
   curl -kL --fail --retry 3 "${serving_url}?uncompressed=false" -o "${tarball}"
 
-  local sudo_cmd=""
-  if [[ "${EUID:-$(id -u)}" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
-    sudo_cmd="sudo"
-  fi
-
   echo "Extracting gdcloud CLI to /usr/local/bin and installing gdcloud-k8s-auth-plugin..."
   ${sudo_cmd} tar -xzf "${tarball}" -C /usr/local/bin/
   ${sudo_cmd} "${gdcloud_root}/bin/gdcloud" components install gdcloud-k8s-auth-plugin
+  ${sudo_cmd} mkdir -p "${gdcloud_root}/plugins"
+  ${sudo_cmd} chmod 0777 "${gdcloud_root}/plugins"
   rm -f "${tarball}"
 
   export PATH="${gdcloud_root}/bin:${PATH}"

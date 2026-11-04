@@ -74,7 +74,15 @@ func TestExec(t *testing.T) {
 }
 
 func TestNewTestingClient(t *testing.T) {
-	t.Setenv("SSL_CERT_FILE", os.Getenv("SSL_CERT_FILE"))
+	t.Setenv("SSL_CERT_FILE", "/existing/ca.pem")
+	if err := os.Unsetenv("SSL_CERT_FILE"); err != nil {
+		t.Fatalf("failed to unset SSL_CERT_FILE: %v", err)
+	}
+	t.Setenv("GDCLOUD_PLUGINS_BASE_DIR", "")
+	if err := os.Unsetenv("GDCLOUD_PLUGINS_BASE_DIR"); err != nil {
+		t.Fatalf("failed to unset GDCLOUD_PLUGINS_BASE_DIR: %v", err)
+	}
+
 	tmpDir := t.TempDir()
 	caFile := filepath.Join(tmpDir, "gdc-ca.pem")
 	wantCAContent := "-----BEGIN CERTIFICATE-----\nFAKE-GDC-CA\n-----END CERTIFICATE-----\n"
@@ -84,7 +92,7 @@ func TestNewTestingClient(t *testing.T) {
 
 	logFile := filepath.Join(tmpDir, "gdcloud-calls.log")
 	mockScript := filepath.Join(tmpDir, "mock-gdcloud.sh")
-	scriptContent := "#!/bin/sh\necho \"SSL_CERT_FILE=${SSL_CERT_FILE} ARGS=$*\" >> \"" + logFile + "\"\n"
+	scriptContent := "#!/bin/sh\necho \"SSL_CERT_FILE=${SSL_CERT_FILE} GDCLOUD_PLUGINS_BASE_DIR=${GDCLOUD_PLUGINS_BASE_DIR} ARGS=$*\" >> \"" + logFile + "\"\n"
 	if err := os.WriteFile(mockScript, []byte(scriptContent), 0755); err != nil {
 		t.Fatalf("failed to write mock gdcloud script: %v", err)
 	}
@@ -97,7 +105,10 @@ func TestNewTestingClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTestingClient() unexpected error: %v", err)
 	}
-	defer client.Cleanup()
+
+	if got := os.Getenv("SSL_CERT_FILE"); got != client.caDataPath {
+		t.Errorf("SSL_CERT_FILE = %q, want %q", got, client.caDataPath)
+	}
 
 	bundleContent, err := os.ReadFile(client.caDataPath)
 	if err != nil {
@@ -107,20 +118,97 @@ func TestNewTestingClient(t *testing.T) {
 		t.Errorf("CA bundle %q missing GDC CA content", client.caDataPath)
 	}
 
+	wantPluginsDir := filepath.Join(client.ConfigDir(), "plugins")
+	if info, err := os.Stat(wantPluginsDir); err != nil || !info.IsDir() {
+		t.Errorf("expected fallback plugins dir %q to exist, stat err: %v", wantPluginsDir, err)
+	}
+
 	logBytes, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatalf("failed to read gdcloud calls log: %v", err)
 	}
 	gotLog := string(logBytes)
+	prefix := "SSL_CERT_FILE=" + client.caDataPath + " GDCLOUD_PLUGINS_BASE_DIR=" + wantPluginsDir + " ARGS="
 	wantCalls := []string{
-		"SSL_CERT_FILE=" + client.caDataPath + " ARGS=config set core/disable_prompts true",
-		"SSL_CERT_FILE=" + client.caDataPath + " ARGS=config set auth/login_config_cert_path " + caFile,
-		"SSL_CERT_FILE=" + client.caDataPath + " ARGS=config set core/organization_console_url https://console.example.com",
-		"SSL_CERT_FILE=" + client.caDataPath + " ARGS=auth activate-service-account --key-file=/tmp/fake-sa.json",
+		prefix + "config set core/disable_prompts true",
+		prefix + "config set auth/login_config_cert_path " + caFile,
+		prefix + "config set core/organization_console_url https://console.example.com",
+		prefix + "auth activate-service-account --key-file=/tmp/fake-sa.json",
 	}
 	for _, want := range wantCalls {
 		if !strings.Contains(gotLog, want) {
 			t.Errorf("NewTestingClient() missing expected call %q in log:\n%s", want, gotLog)
 		}
+	}
+
+	if err := client.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() unexpected error: %v", err)
+	}
+	if val, ok := os.LookupEnv("SSL_CERT_FILE"); ok {
+		t.Errorf("expected SSL_CERT_FILE to be unset after Cleanup(), got %q", val)
+	}
+}
+
+func TestNewTestingClientRestoresSSLCertFile(t *testing.T) {
+	const prevVal = "/custom/previous-ca.pem"
+	t.Setenv("SSL_CERT_FILE", prevVal)
+
+	tmpDir := t.TempDir()
+	caFile := filepath.Join(tmpDir, "gdc-ca.pem")
+	if err := os.WriteFile(caFile, []byte("-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n"), 0600); err != nil {
+		t.Fatalf("failed to write fake CA file: %v", err)
+	}
+
+	// 1. Verify error path in NewTestingClient restores previous SSL_CERT_FILE.
+	originalLocationFunc := gdcloudLocation
+	defer func() { gdcloudLocation = originalLocationFunc }()
+	gdcloudLocation = func() string { return "nonexistent-gdcloud-binary-xyz" }
+
+	if _, err := NewTestingClient(caFile, "/tmp/fake-sa.json", "https://console.example.com"); err == nil {
+		t.Fatalf("expected NewTestingClient() to fail when binary is missing")
+	}
+	if got := os.Getenv("SSL_CERT_FILE"); got != prevVal {
+		t.Errorf("SSL_CERT_FILE after failed NewTestingClient() = %q, want %q", got, prevVal)
+	}
+
+	// 2. Verify writable SDK plugins directory does not override GDCLOUD_PLUGINS_BASE_DIR,
+	// and Cleanup() restores previous SSL_CERT_FILE.
+	t.Setenv("GDCLOUD_PLUGINS_BASE_DIR", "")
+	if err := os.Unsetenv("GDCLOUD_PLUGINS_BASE_DIR"); err != nil {
+		t.Fatalf("failed to unset GDCLOUD_PLUGINS_BASE_DIR: %v", err)
+	}
+	sdkBinDir := filepath.Join(tmpDir, "sdk", "bin")
+	sdkPluginsDir := filepath.Join(tmpDir, "sdk", "plugins")
+	if err := os.MkdirAll(sdkBinDir, 0755); err != nil {
+		t.Fatalf("failed to create sdk bin dir: %v", err)
+	}
+	if err := os.MkdirAll(sdkPluginsDir, 0755); err != nil {
+		t.Fatalf("failed to create sdk plugins dir: %v", err)
+	}
+	logFile := filepath.Join(tmpDir, "sdk-calls.log")
+	mockScript := filepath.Join(sdkBinDir, "gdcloud")
+	scriptContent := "#!/bin/sh\necho \"GDCLOUD_PLUGINS_BASE_DIR=${GDCLOUD_PLUGINS_BASE_DIR}\" >> \"" + logFile + "\"\n"
+	if err := os.WriteFile(mockScript, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("failed to write mock gdcloud script: %v", err)
+	}
+	gdcloudLocation = func() string { return mockScript }
+
+	client, err := NewTestingClient(caFile, "/tmp/fake-sa.json", "https://console.example.com")
+	if err != nil {
+		t.Fatalf("NewTestingClient() unexpected error: %v", err)
+	}
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("failed to read sdk calls log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "GDCLOUD_PLUGINS_BASE_DIR=\n") {
+		t.Errorf("expected GDCLOUD_PLUGINS_BASE_DIR to remain unset when SDK plugins dir is writable, got log:\n%s", string(logBytes))
+	}
+
+	if err := client.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() unexpected error: %v", err)
+	}
+	if got := os.Getenv("SSL_CERT_FILE"); got != prevVal {
+		t.Errorf("SSL_CERT_FILE after Cleanup() = %q, want %q", got, prevVal)
 	}
 }

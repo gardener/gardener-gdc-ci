@@ -35,8 +35,11 @@ var gdcloudLocation = func() string {
 // TestingClient provides a hermetic wrapper around the gdcloud CLI.
 // It manages an isolated execution environment for safe concurrent testing.
 type TestingClient struct {
-	configDir  string
-	caDataPath string
+	configDir       string
+	caDataPath      string
+	prevSSLCertFile string
+	hadSSLCertFile  bool
+	setSSLCertFile  bool
 }
 
 // ConfigDir returns the path to the hermetic configuration directory managed by this client.
@@ -54,8 +57,14 @@ func NewTestingClient(caDataPath, serviceaccountPath string, consoleURL string) 
 		return nil, fmt.Errorf("failed to create temp directory for gdcloud config: %w", err)
 	}
 
+	prevSSLCertFile, hadSSLCertFile := os.LookupEnv("SSL_CERT_FILE")
+	setSSLCertFile := false
+
 	defer func() {
 		if err != nil {
+			if setSSLCertFile {
+				restoreSSLCertFile(prevSSLCertFile, hadSSLCertFile)
+			}
 			os.RemoveAll(configDir)
 		}
 	}()
@@ -63,11 +72,15 @@ func NewTestingClient(caDataPath, serviceaccountPath string, consoleURL string) 
 	caBundlePath := buildCABundle(configDir, caDataPath)
 	if caBundlePath != "" {
 		_ = os.Setenv("SSL_CERT_FILE", caBundlePath)
+		setSSLCertFile = true
 	}
 
 	c := &TestingClient{
-		configDir:  configDir,
-		caDataPath: caBundlePath,
+		configDir:       configDir,
+		caDataPath:      caBundlePath,
+		prevSSLCertFile: prevSSLCertFile,
+		hadSSLCertFile:  hadSSLCertFile,
+		setSSLCertFile:  setSSLCertFile,
 	}
 
 	if result, err := c.Exec("config", "set", "core/disable_prompts", "true"); err != nil {
@@ -113,9 +126,81 @@ func buildCABundle(configDir, caDataPath string) string {
 	return bundlePath
 }
 
-// Cleanup removes the temporary configuration directory used by the testing client.
+// Cleanup restores SSL_CERT_FILE to its previous state and removes the temporary
+// configuration directory used by the testing client.
 func (c *TestingClient) Cleanup() error {
+	if c.setSSLCertFile {
+		restoreSSLCertFile(c.prevSSLCertFile, c.hadSSLCertFile)
+		c.setSSLCertFile = false
+	}
 	return os.RemoveAll(c.configDir)
+}
+
+func restoreSSLCertFile(prev string, hadPrev bool) {
+	if hadPrev {
+		_ = os.Setenv("SSL_CERT_FILE", prev)
+	} else {
+		_ = os.Unsetenv("SSL_CERT_FILE")
+	}
+}
+
+// resolvePluginsDir returns a writable directory path for GDCLOUD_PLUGINS_BASE_DIR
+// when GDCLOUD_PLUGINS_BASE_DIR is not already set in the environment and the default
+// gdcloud SDK plugins directory is not writable by the current user (e.g., when
+// gdcloud is installed under /usr/local/bin by root).
+func (c *TestingClient) resolvePluginsDir(executable string) string {
+	if envDir := os.Getenv("GDCLOUD_PLUGINS_BASE_DIR"); envDir != "" {
+		_ = os.MkdirAll(envDir, 0755)
+		return ""
+	}
+	if hasWritableDefaultPluginsDir(executable) {
+		return ""
+	}
+	if c.configDir == "" {
+		return ""
+	}
+	if info, err := os.Stat(c.configDir); err != nil || !info.IsDir() {
+		return ""
+	}
+	pluginsDir := filepath.Join(c.configDir, "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		return ""
+	}
+	return pluginsDir
+}
+
+// hasWritableDefaultPluginsDir reports whether the default gdcloud SDK plugins
+// directory (<binDir>/plugins or <gdcloudRoot>/plugins) is writable by the current user.
+func hasWritableDefaultPluginsDir(executable string) bool {
+	realExec, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		realExec = executable
+	}
+	binDir := filepath.Dir(realExec)
+	siblingPlugins := filepath.Join(binDir, "plugins")
+	if info, err := os.Stat(siblingPlugins); err == nil && info.IsDir() {
+		return isExistingDirWritable(siblingPlugins)
+	}
+	if filepath.Base(binDir) != "bin" {
+		return false
+	}
+	gdcloudRoot := filepath.Dir(binDir)
+	parentPlugins := filepath.Join(gdcloudRoot, "plugins")
+	if info, err := os.Stat(parentPlugins); err == nil && info.IsDir() {
+		return isExistingDirWritable(parentPlugins)
+	}
+	return isExistingDirWritable(gdcloudRoot)
+}
+
+func isExistingDirWritable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".gdcloud-write-check-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return true
 }
 
 // Exec executes a gdcloud CLI command using the testing client's hermetic configuration.
@@ -129,6 +214,8 @@ func (c *TestingClient) Exec(args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot locate gdcloud binary: %w", err)
 	}
+
+	pluginsDir := c.resolvePluginsDir(executable)
 
 	maxAttempts := 1
 	if len(args) > 0 && (args[0] == "auth" || args[0] == "clusters") {
@@ -150,6 +237,9 @@ func (c *TestingClient) Exec(args ...string) ([]byte, error) {
 		)
 		if c.caDataPath != "" {
 			cmd.Env = append(cmd.Env, "SSL_CERT_FILE="+c.caDataPath)
+		}
+		if pluginsDir != "" {
+			cmd.Env = append(cmd.Env, "GDCLOUD_PLUGINS_BASE_DIR="+pluginsDir)
 		}
 
 		result, err = cmd.CombinedOutput()
