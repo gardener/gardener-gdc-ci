@@ -2,15 +2,15 @@
   {
     "runId": "41794620311",
     "runNumber": "194",
-    "timestamp": "2026-11-04T09:41:25Z",
+    "timestamp": "2026-11-04T09:50:35Z",
     "trigger": "workflow_dispatch",
     "releaseMode": "release",
     "actor": "dilipkumar2k6",
-    "status": "failure",
-    "duration": "1h 54m 18s",
+    "status": "in_progress",
+    "duration": "1m 3s",
     "artifactsVersion": "v0.5.9",
     "runUrl": "https://github.com/gardener/gardener-gdc-ci/actions/runs/41794620311",
-    "publicRegistry": "europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci",
+    "publicRegistry": "europe-docker.pkg.dev/gardener-project/public",
     "componentVersions": {
       "extensionProviderGDC": "v0.5.9",
       "mcmProviderGDC": "v0.5.8",
@@ -20,18 +20,18 @@
     "components": {
       "extensionProviderGDC": "ed90c37",
       "mcmProviderGDC": "1139923",
-      "externalDNS": "1eed781",
+      "externalDNS": "54454eb",
       "cloudProviderGDC": "5fb4817"
     },
     "stages": {
-      "build": "success",
-      "deployGarden": "success",
-      "deploySeed": "success",
-      "deployShoot": "success",
-      "testShoot": "success",
-      "teardown": "success",
-      "publish": "failure",
-      "ocm": "skipped"
+      "build": "in_progress",
+      "deployGarden": "pending",
+      "deploySeed": "pending",
+      "deployShoot": "pending",
+      "testShoot": "pending",
+      "teardown": "pending",
+      "publish": "pending",
+      "ocm": "pending"
     }
   },
   {
