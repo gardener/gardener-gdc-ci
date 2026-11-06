@@ -29,6 +29,10 @@ additionalVolumes: []
 additionalVolumeMounts: []
 env: []
 vpa: false
+{{- if .ImageVectorOverwrite}}
+imageVectorOverwrite: |
+{{.ImageVectorOverwrite}}
+{{- end}}
 config:
   gardenClientConnection:
     qps: 100

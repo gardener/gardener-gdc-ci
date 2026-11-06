@@ -17,7 +17,7 @@ GARDENER_ARTIFACTS_VERSION="$(yq -r '.gardenerArtifactsVersion' "${RELEASE_METAD
 MCM_PROVIDER_GDC_ARTIFACTS_VERSION="$(yq -r '.mcmProviderGDCArtifactsVersion // .gardenerArtifactsVersion' "${RELEASE_METADATA_FILE}")"
 CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="$(yq -r '.cloudProviderGDCArtifactsVersion // .gardenerArtifactsVersion' "${RELEASE_METADATA_FILE}")"
 
-if ! go test -v -timeout=65m "${REPO_ROOT}/integration/release/seed" \
+if ! go test -v -timeout=65m -run '^TestCreateSeedCluster$' "${REPO_ROOT}/integration/release/seed" \
   -args \
   --release-configuration-file-path="${UPDATED_PIPELINE_CONFIG_FILE}" \
   --gardener-artifacts-version="${GARDENER_ARTIFACTS_VERSION}" \

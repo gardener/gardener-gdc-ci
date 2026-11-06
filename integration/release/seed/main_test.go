@@ -95,6 +95,7 @@ type seedTemplateData struct {
 	DualzoneProviderConfig   string
 	BackupBucketCredSecret   string
 	CommitHash               string
+	ImageVectorOverwrite     string
 }
 
 type LoginConfig struct {
@@ -850,6 +851,12 @@ func prepareGardenletHelmValues(releaseConfigData *config.ReleaseTestConfig) (ma
 	caData := releaseConfigData.TestShoot.VirtualGarden.CAData
 	gardenClusterURL := releaseConfigData.TestShoot.VirtualGarden.Host
 	dualzoneProviderConfig, backupBucketCredSecret := getDualzoneBucketConfig(releaseConfigData.GDC.DualZoneBucketLocation)
+
+	imageVectorOverwrite, err := gardener.BuildGardenletImageVectorOverwrite(releaseConfigData.GDC.CAData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build gardenlet imageVectorOverwrite: %w", err)
+	}
+
 	seedData := &seedTemplateData{
 		SeedName:                 releaseConfigData.Seed.Name,
 		GardenerVersion:          releaseConfigData.Gardener.GardenerVersion,
@@ -865,6 +872,7 @@ func prepareGardenletHelmValues(releaseConfigData *config.ReleaseTestConfig) (ma
 		DualzoneProviderConfig:   dualzoneProviderConfig,
 		BackupBucketCredSecret:   backupBucketCredSecret,
 		CommitHash:               gardenerArtifactsVersion,
+		ImageVectorOverwrite:     indentYAMLBlock(imageVectorOverwrite, "  "),
 	}
 
 	// Generate values from template
@@ -884,6 +892,19 @@ func prepareGardenletHelmValues(releaseConfigData *config.ReleaseTestConfig) (ma
 	}
 
 	return values, seedData, nil
+}
+
+func indentYAMLBlock(s, prefix string) string {
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, line := range lines {
+		if line != "" {
+			lines[i] = prefix + line
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // waitForSeedReady polls the Seed object until all required conditions (SeedSystemComponentsHealthy,

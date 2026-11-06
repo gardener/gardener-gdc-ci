@@ -64,26 +64,26 @@ gardener:
     version: v1.84.0
   csiImages:
     csiDriver:
-      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/kvcsi-driver-gdch
+      repository: harbor.org.internal/library/private-cloud-staging/kvcsi-driver-gdch
       tag: "v0.0.0-gke.45"
     csiProvisioner:
-      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-provisioner
+      repository: harbor.org.internal/library/private-cloud-staging/csi-provisioner
       tag: "v6.0.1-gdcag.9"
     csiAttacher:
-      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-attacher
+      repository: harbor.org.internal/library/private-cloud-staging/csi-attacher
       tag: "v4.8.1-gdcag.8"
     csiLivenessProbe:
-      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/livenessprobe
+      repository: harbor.org.internal/library/private-cloud-staging/livenessprobe
       tag: "v2.9.0-gke.1"
     csiNodeDriverRegistrar:
-      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-node-driver-registrar
+      repository: harbor.org.internal/library/private-cloud-staging/csi-node-driver-registrar
       tag: "v2.13.0-gke.21"
     csiSnapshotter:
-      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-snapshotter
+      repository: harbor.org.internal/library/private-cloud-staging/csi-snapshotter
       tag: "v8.2.1-gdcag.10"
     csiSnapshotController:
-      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/anthos-baremetal-release/snapshot-controller
+      repository: harbor.org.internal/library/anthos-baremetal-release/snapshot-controller
       tag: "v8.5.0-gke.30"
     csiResizer:
-      repository: harbor.gdc1.us-west6-a.staging.gpcdemolabs.com/library/private-cloud-staging/csi-resizer
+      repository: harbor.org.internal/library/private-cloud-staging/csi-resizer
       tag: "v1.13.2-gdcag.7"
