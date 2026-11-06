@@ -291,9 +291,14 @@ jobs:
         id: ocm_notes_blob
         if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.attach == 'true'
         run: |
+          # Attach the release-notes as a plain-markdown local blob (no tar, no gzip).
+          # cc-utils' release-notes consumer (release_notes/ocm.py) reads the resource
+          # named `release-notes` as a single markdown blob and decodes it as UTF-8;
+          # it only decompresses when access.mediaType ends in `/gzip`. A gzipped tar
+          # here therefore crashes consumers with `UnicodeDecodeError: ... byte 0x8b`.
           mkdir -p /tmp/gardener-gdc-release/blobs.d
-          tar czf /tmp/gardener-gdc-release/blobs.d/release-notes.tar.gz \
-            -C /tmp/gardener-gdc-release gdc-release-notes.md
+          cp /tmp/gardener-gdc-release/gdc-release-notes.md \
+            /tmp/gardener-gdc-release/blobs.d/release-notes.md
 
       - name: Export Release Notes OCM Fragment
         id: ocm_notes
@@ -305,9 +310,11 @@ jobs:
           ocm-resources: |
             - name: release-notes
               relation: local
+              type: text/markdown.release-notes
               access:
                 type: localBlob
-                localReference: release-notes.tar.gz
+                localReference: release-notes.md
+                mediaType: text/markdown.release-notes
               labels:
                 - name: gardener.cloud/purposes
                   value:
