@@ -334,6 +334,9 @@ jobs:
               access:
                 type: localBlob
                 localReference: gosec-report.tar.gz
+              srcRefs:
+                - identitySelector:
+                    name: main-source
               labels:
                 - name: gardener.cloud/purposes
                   value:
