@@ -1,5 +1,40 @@
 [
   {
+    "runId": "42597779415",
+    "runNumber": "199",
+    "timestamp": "2026-11-09T10:02:57Z",
+    "trigger": "schedule",
+    "releaseMode": "snapshot",
+    "actor": "dilipkumar2k6",
+    "status": "in_progress",
+    "duration": "1m 8s",
+    "artifactsVersion": "v0.5.10-dev-c58e43a",
+    "runUrl": "https://github.com/gardener/gardener-gdc-ci/actions/runs/42597779415",
+    "publicRegistry": "europe-docker.pkg.dev/gardener-project/public",
+    "componentVersions": {
+      "extensionProviderGDC": "v0.5.10-dev-c58e43a",
+      "mcmProviderGDC": "v0.5.9-dev-1ca6785",
+      "cloudProviderGDC": "v0.5.7-dev-2d0d48c",
+      "externalDNS": "v0.55.0-dev-91599ad"
+    },
+    "components": {
+      "extensionProviderGDC": "c58e43a",
+      "mcmProviderGDC": "1ca6785",
+      "externalDNS": "91599ad",
+      "cloudProviderGDC": "2d0d48c"
+    },
+    "stages": {
+      "build": "in_progress",
+      "deployGarden": "pending",
+      "deploySeed": "pending",
+      "deployShoot": "pending",
+      "testShoot": "pending",
+      "teardown": "pending",
+      "publish": "pending",
+      "ocm": "pending"
+    }
+  },
+  {
     "runId": "42313274856",
     "runNumber": "198",
     "timestamp": "2026-11-07T00:52:52Z",
