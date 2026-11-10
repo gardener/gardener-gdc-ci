@@ -1,0 +1,14 @@
+Google Distributed Cloud (GDC) CI and Release Automation for Gardener
+Copyright 2025-2026 Google LLC
+
+This product includes software developed at
+Google LLC (https://www.google.com/).
+
+-------------------------------------------------------------------------------
+Third-Party Software Notices and Attributions
+-------------------------------------------------------------------------------
+
+1. Gardener
+   https://github.com/gardener/gardener
+   Copyright SAP SE or an SAP affiliate company and Gardener contributors
+   Licensed under the Apache License, Version 2.0.
