@@ -16,16 +16,16 @@ gcp:
   # GKE clusters that hosts the virtual garden clusters to use.
   gkeClusters:
     - name: staging-runtime-1
-      zone: us-central1
+      zone: us-west1
       project: dilipkumardk-gardener-lab
     - name: staging-runtime-2
-      zone: us-central1
+      zone: us-west1
       project: dilipkumardk-gardener-lab
     - name: staging-runtime-3
-      zone: us-central1
+      zone: us-west1
       project: dilipkumardk-gardener-lab
     - name: staging-runtime-4
-      zone: us-central1
+      zone: us-west1
       project: dilipkumardk-gardener-lab
 gdc:
   project: sapbtp
