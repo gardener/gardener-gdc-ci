@@ -15,6 +15,7 @@
 package config
 
 import (
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/gdcloud"
@@ -121,6 +122,8 @@ type RuntimeClusterConfig struct {
 type VirtualGardenConfig struct {
 	// Client is the Kubernetes client for the garden cluster.
 	Client client.WithWatch
+	// ClientSet is the standard Kubernetes clientset for operations like fetching pod logs.
+	ClientSet kubernetes.Interface
 	// CAData is the CA data of the garden cluster.
 	CAData []byte
 	// Host is the host of the garden cluster.
@@ -160,10 +163,11 @@ type ReleaseTestConfig struct {
 	TestShoot *ShootConfig
 
 	// Clients
-	RuntimeClusterClient client.WithWatch
-	RuntimeClusterName   string
-	GlobalAPIClient      client.WithWatch
-	ManagementClients    map[string]client.WithWatch
+	RuntimeClusterClient    client.WithWatch
+	RuntimeClusterClientSet kubernetes.Interface
+	RuntimeClusterName      string
+	GlobalAPIClient         client.WithWatch
+	ManagementClients       map[string]client.WithWatch
 
 	// Test Resources
 	ImagePullCredentials []byte

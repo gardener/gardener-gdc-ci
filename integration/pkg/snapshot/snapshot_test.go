@@ -316,3 +316,61 @@ func TestCaptureSnapshot_PartialSnapshotError(t *testing.T) {
 		t.Errorf("Expected error message to contain %q, got %q", expectedErrStr, partialErr.Error())
 	}
 }
+
+func TestCaptureSnapshot_ContinuesOnMissingCRDAndEmptyLabelTarget(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	svc := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Service",
+			"metadata": map[string]interface{}{
+				"name":      "gardenlet",
+				"namespace": "garden",
+			},
+		},
+	}
+
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+	mapper.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
+	mapper.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Service"}, meta.RESTScopeNamespace)
+
+	crClient := fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).WithObjects(svc).Build()
+
+	config := ClusterSnapshotConfig{
+		ClusterName: "seed-cluster",
+		Targets: []NamespaceTarget{
+			{
+				Namespace: "garden",
+				Resources: []ResourceTarget{
+					// Uninstalled CRD listed before Service should record a partial error without aborting Service capture.
+					{APIVersion: "extensions.gardener.cloud/v1alpha1", Kind: "DNSRecord"},
+					{APIVersion: "v1", Kind: "Service"},
+				},
+			},
+			{
+				// Label-matched target with 0 matching namespaces should be skipped cleanly.
+				MatchLabels: map[string]string{"gardener.cloud/role": "extension"},
+				Resources: []ResourceTarget{
+					{APIVersion: "v1", Kind: "Pod"},
+				},
+			},
+		},
+	}
+
+	tempDir := t.TempDir()
+	err := CaptureSnapshotToDir(context.Background(), SnapshotClients{CRClient: crClient}, tempDir, CaptureOptions{Config: &config})
+	var partialErr *PartialSnapshotError
+	if !errors.As(err, &partialErr) {
+		t.Fatalf("Expected PartialSnapshotError for missing DNSRecord CRD, got: %T (%v)", err, err)
+	}
+	if len(partialErr.Errors) != 1 {
+		t.Errorf("Expected 1 partial error, got %d: %v", len(partialErr.Errors), partialErr.Errors)
+	}
+
+	expectedPath := filepath.Join(tempDir, "garden", "services", "gardenlet.yaml")
+	if _, statErr := os.Stat(expectedPath); statErr != nil {
+		t.Errorf("Expected Service manifest %s to still be captured after missing CRD, got: %v", expectedPath, statErr)
+	}
+}
