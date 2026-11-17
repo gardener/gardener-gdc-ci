@@ -802,18 +802,16 @@ func suppressRemoteShootTargetVPA(ctx context.Context, releaseConfigData *config
 	}
 	targetClient := shootClients.WatchClient
 
-	// Suspend target resource-manager RBAC and remove host Shoot VPA target bindings/webhook on the Seed host cluster.
-	crb := &unstructured.Unstructured{}
-	crb.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "rbac.authorization.k8s.io",
-		Version: "v1",
-		Kind:    "ClusterRoleBinding",
-	})
-	if err := targetClient.Get(ctx, client.ObjectKey{Name: "gardener.cloud:target:resource-manager"}, crb); err == nil {
-		unstructured.RemoveNestedField(crb.Object, "subjects")
-		_ = targetClient.Update(ctx, crb)
-	}
+	// Remove host Shoot VPA target bindings and mutating webhook on the Seed host cluster.
+	// Note: Do NOT modify ClusterRoleBinding "gardener.cloud:target:resource-manager" here;
+	// gardener-resource-manager's token-requestor controller needs that binding to rotate
+	// shoot-access-* ServiceAccount tokens (including kube-controller-manager), and setting
+	// resources.gardener.cloud/ignore="true" on ManagedResource/shoot-core-vpa above already
+	// prevents gardener-resource-manager from reconciling or recreating the Shoot VPA resources.
+	deleteTargetShootVPAResources(ctx, targetClient)
+}
 
+func deleteTargetShootVPAResources(ctx context.Context, targetClient client.Client) {
 	targetVPACRBs := []string{
 		"gardener.cloud:vpa:target:actor",
 		"gardener.cloud:vpa:target:admission-controller",

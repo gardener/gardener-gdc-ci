@@ -15,6 +15,7 @@
 package seed
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -27,6 +28,13 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/config"
 )
@@ -133,4 +141,58 @@ func TestPrepareGardenletHelmValues(t *testing.T) {
 			t.Errorf("expected imageVectorOverwrite to be omitted when GDC.CAData is empty, got %v", values["imageVectorOverwrite"])
 		}
 	})
+}
+
+func TestDeleteTargetShootVPAResources(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := rbacv1.AddToScheme(s); err != nil {
+		t.Fatalf("failed to add rbacv1 scheme: %v", err)
+	}
+	if err := admissionregistrationv1.AddToScheme(s); err != nil {
+		t.Fatalf("failed to add admissionregistrationv1 scheme: %v", err)
+	}
+
+	grmCRB := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "gardener.cloud:target:resource-manager"},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "cluster-admin",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "gardener-resource-manager",
+				Namespace: "kube-system",
+			},
+		},
+	}
+	vpaActorCRB := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "gardener.cloud:vpa:target:actor"},
+	}
+	vpaWebhook := &admissionregistrationv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "vpa-webhook-config-target"},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(grmCRB, vpaActorCRB, vpaWebhook).Build()
+	ctx := context.Background()
+
+	deleteTargetShootVPAResources(ctx, fakeClient)
+
+	// Verify gardener.cloud:target:resource-manager and its subjects remain intact so token-requestor keeps working.
+	gotGRM := &rbacv1.ClusterRoleBinding{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: "gardener.cloud:target:resource-manager"}, gotGRM); err != nil {
+		t.Fatalf("expected gardener.cloud:target:resource-manager to remain present, got error: %v", err)
+	}
+	if len(gotGRM.Subjects) != 1 || gotGRM.Subjects[0].Name != "gardener-resource-manager" {
+		t.Errorf("expected gardener.cloud:target:resource-manager subjects to remain intact, got %+v", gotGRM.Subjects)
+	}
+
+	// Verify target VPA CRB and webhook were deleted.
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: "gardener.cloud:vpa:target:actor"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected gardener.cloud:vpa:target:actor to be deleted, got err=%v", err)
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: "vpa-webhook-config-target"}, &admissionregistrationv1.MutatingWebhookConfiguration{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected vpa-webhook-config-target to be deleted, got err=%v", err)
+	}
 }

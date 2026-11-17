@@ -43,6 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -293,6 +294,11 @@ var GetGardenClient = func(ctx context.Context, userClusterClient client.Client)
 		return nil, fmt.Errorf("failed to create garden client: %w", err)
 	}
 
+	gardenClientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create garden clientset: %w", err)
+	}
+
 	// Verify connection to virtual-garden API server, retrying on transient downtime/restarts
 	var lastErr error
 	pollErr := wait.PollUntilContextTimeout(ctx, 5*time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
@@ -308,9 +314,10 @@ var GetGardenClient = func(ctx context.Context, userClusterClient client.Client)
 	}
 
 	return &VirtualGardenConfig{
-		Client: gardenClient,
-		Host:   restConfig.Host,
-		CAData: restConfig.CAData,
+		Client:    gardenClient,
+		ClientSet: gardenClientset,
+		Host:      restConfig.Host,
+		CAData:    restConfig.CAData,
 	}, nil
 }
 

@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -286,7 +287,12 @@ func findShootInGarden(ctx context.Context, gardenClient client.WithWatch, garde
 				shootWithMatchingHash = shoot
 				break
 			}
-		} else if unannotatedShoot == nil {
+		} else if unannotatedShoot == nil && allocateNewClusters {
+			healthy, reason := isShootHealthyForSeed(shoot)
+			if !healthy {
+				log.Printf("WARN: skipping unhealthy idle shoot '%s/%s' in cluster %q: %s", shoot.Namespace, shoot.Name, userClusterName, reason)
+				continue
+			}
 			unannotatedShoot = shoot
 		}
 	}
@@ -302,6 +308,61 @@ func findShootInGarden(ctx context.Context, gardenClient client.WithWatch, garde
 	}
 
 	return nil, false, nil // No suitable shoot found in this garden
+}
+
+// isShootHealthyForSeed verifies that an idle Shoot is not terminating and reports healthy
+// API server, control plane, system components, and worker nodes before allocating it as a Seed host.
+func isShootHealthyForSeed(shoot *gardencorev1beta1.Shoot) (bool, string) {
+	if shoot == nil {
+		return false, "shoot is nil"
+	}
+	if shoot.DeletionTimestamp != nil {
+		return false, "shoot is being deleted"
+	}
+
+	requiredConditions := []gardencorev1beta1.ConditionType{
+		gardencorev1beta1.ShootAPIServerAvailable,
+		gardencorev1beta1.ShootControlPlaneHealthy,
+		gardencorev1beta1.ShootSystemComponentsHealthy,
+		gardencorev1beta1.ShootEveryNodeReady,
+	}
+
+	condMap := make(map[gardencorev1beta1.ConditionType]gardencorev1beta1.Condition, len(shoot.Status.Conditions))
+	for _, cond := range shoot.Status.Conditions {
+		condMap[cond.Type] = cond
+	}
+
+	for _, req := range requiredConditions {
+		cond, ok := condMap[req]
+		if !ok {
+			return false, fmt.Sprintf("missing condition %s", req)
+		}
+		if cond.Status != gardencorev1beta1.ConditionTrue {
+			return false, fmt.Sprintf("condition %s=%s (%s: %s)", req, cond.Status, cond.Reason, cond.Message)
+		}
+	}
+	return true, ""
+}
+
+// buildClientsetForRuntimeCluster attempts to create a standard Kubernetes Clientset
+// from the cached kubeconfig for the selected runtime cluster (used for pod log capture).
+func buildClientsetForRuntimeCluster(clusterName string) kubernetes.Interface {
+	if clusterName == "" {
+		return nil
+	}
+	kubeconfigPath := fmt.Sprintf("/tmp/%s-kubeconfig", clusterName)
+	if _, err := os.Stat(kubeconfigPath); err != nil {
+		return nil
+	}
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return nil
+	}
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil
+	}
+	return cs
 }
 
 var gdcloudInit = func(ctx context.Context, pipelineCfg *pipelineConfig) (*gdcloud.TestingClient, error) {

@@ -90,6 +90,10 @@ func CaptureSnapshotToDir(ctx context.Context, clients SnapshotClients, dir stri
 		if err != nil {
 			return err
 		}
+		if len(namespaces) == 0 {
+			log.Printf("No namespaces matched target (matchLabels: %v), skipping target", target.MatchLabels)
+			continue
+		}
 
 		if target.Resources == nil {
 			log.Printf("target.Resources is nil for target (namespace: %q, matchLabels: %v), automatically discovering all known APIs", target.Namespace, target.MatchLabels)
@@ -103,7 +107,8 @@ func CaptureSnapshotToDir(ctx context.Context, clients SnapshotClients, dir stri
 			}
 			mapping, err := clients.CRClient.RESTMapper().RESTMapping(schema.GroupKind{Group: gv.Group, Kind: res.Kind}, gv.Version)
 			if err != nil {
-				return fmt.Errorf("failed to find REST mapping for %s %s: %w", res.APIVersion, res.Kind, err)
+				errs = append(errs, fmt.Errorf("failed to find REST mapping for %s %s: %w", res.APIVersion, res.Kind, err))
+				continue
 			}
 			resourceName := mapping.Resource.Resource
 
@@ -400,7 +405,7 @@ func getNamespaces(ctx context.Context, k8sClient client.Client, target Namespac
 
 	if len(namespaces) == 0 {
 		if hasLabels {
-			return nil, fmt.Errorf("no namespaces found with labels %v", target.MatchLabels)
+			return nil, nil
 		}
 		return nil, fmt.Errorf("no namespaces found in cluster")
 	}

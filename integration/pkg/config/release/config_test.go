@@ -53,6 +53,15 @@ func (f *fakeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return f.response, nil
 }
 
+func healthyShootConditions() []gardencorev1beta1.Condition {
+	return []gardencorev1beta1.Condition{
+		{Type: gardencorev1beta1.ShootAPIServerAvailable, Status: gardencorev1beta1.ConditionTrue},
+		{Type: gardencorev1beta1.ShootControlPlaneHealthy, Status: gardencorev1beta1.ConditionTrue},
+		{Type: gardencorev1beta1.ShootSystemComponentsHealthy, Status: gardencorev1beta1.ConditionTrue},
+		{Type: gardencorev1beta1.ShootEveryNodeReady, Status: gardencorev1beta1.ConditionTrue},
+	}
+}
+
 func TestLoadReleaseTestConfig(t *testing.T) {
 	gardenerinternal.GetShootKubeconfig = func(ctx context.Context, gardenClient client.Client, shootKey client.ObjectKey) ([]byte, error) {
 		return []byte("fake-kubeconfig-data"), nil
@@ -101,6 +110,9 @@ func TestLoadReleaseTestConfig(t *testing.T) {
 				Pods:     ptr.To("10.0.0.0/16"),
 				Services: ptr.To("10.1.0.0/16"),
 			},
+		},
+		Status: gardencorev1beta1.ShootStatus{
+			Conditions: healthyShootConditions(),
 		},
 	}
 
@@ -638,4 +650,84 @@ gdc:
 	if _, ok := shootAnnotations[CommitHashAnnotation]; ok {
 		t.Errorf("Expected unannotated-shoot to have no %s annotation, but got %v", CommitHashAnnotation, shootAnnotations)
 	}
+}
+
+func TestFindShootInGarden_SkipsUnhealthyShoot(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := gardencorev1beta1.AddToScheme(s); err != nil {
+		t.Fatalf("failed to add gardencorev1beta1 scheme: %v", err)
+	}
+
+	degradedShoot := &gardencorev1beta1.Shoot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sh-grv-1-a",
+			Namespace: "garden",
+		},
+		Status: gardencorev1beta1.ShootStatus{
+			Conditions: []gardencorev1beta1.Condition{
+				{Type: gardencorev1beta1.ShootAPIServerAvailable, Status: gardencorev1beta1.ConditionFalse, Reason: "APIServerDown", Message: "Could not reach API server"},
+				{Type: gardencorev1beta1.ShootControlPlaneHealthy, Status: gardencorev1beta1.ConditionFalse},
+				{Type: gardencorev1beta1.ShootSystemComponentsHealthy, Status: gardencorev1beta1.ConditionUnknown},
+				{Type: gardencorev1beta1.ShootEveryNodeReady, Status: gardencorev1beta1.ConditionUnknown},
+			},
+		},
+	}
+	healthyShoot := &gardencorev1beta1.Shoot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sh-grv-2-a",
+			Namespace: "garden",
+		},
+		Status: gardencorev1beta1.ShootStatus{
+			Conditions: healthyShootConditions(),
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), optionsKey{}, &LoadOptions{AllocateNewClusters: true})
+
+	t.Run("skips degraded shoot and selects healthy idle shoot", func(t *testing.T) {
+		gardenClient := fake.NewClientBuilder().WithScheme(s).WithObjects(degradedShoot.DeepCopy(), healthyShoot.DeepCopy()).Build()
+		got, needsAnnotation, err := findShootInGarden(ctx, gardenClient, "v0.5.11-dev-abc1234", "gardener-grover-3")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil {
+			t.Fatalf("expected healthy shoot to be selected, got nil")
+		}
+		if got.Name != "sh-grv-2-a" {
+			t.Errorf("got shoot %q, want %q", got.Name, "sh-grv-2-a")
+		}
+		if !needsAnnotation {
+			t.Errorf("expected needsAnnotation=true for newly allocated shoot")
+		}
+	})
+
+	t.Run("returns nil when all idle shoots are degraded", func(t *testing.T) {
+		gardenClient := fake.NewClientBuilder().WithScheme(s).WithObjects(degradedShoot.DeepCopy()).Build()
+		got, needsAnnotation, err := findShootInGarden(ctx, gardenClient, "v0.5.11-dev-abc1234", "gardener-grover-3")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != nil || needsAnnotation {
+			t.Errorf("expected nil shoot when all idle shoots are unhealthy, got %v (needsAnnotation=%v)", got, needsAnnotation)
+		}
+	})
+
+	t.Run("still matches already-annotated shoot by commit hash during teardown", func(t *testing.T) {
+		annotatedDegraded := degradedShoot.DeepCopy()
+		annotatedDegraded.Annotations = map[string]string{
+			CommitHashAnnotation: "v0.5.11-dev-abc1234",
+		}
+		noAllocCtx := context.WithValue(context.Background(), optionsKey{}, &LoadOptions{AllocateNewClusters: false})
+		gardenClient := fake.NewClientBuilder().WithScheme(s).WithObjects(annotatedDegraded).Build()
+		got, needsAnnotation, err := findShootInGarden(noAllocCtx, gardenClient, "v0.5.11-dev-abc1234", "gardener-grover-3")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil || got.Name != "sh-grv-1-a" {
+			t.Fatalf("expected matching annotated shoot sh-grv-1-a for teardown lookup, got %v", got)
+		}
+		if needsAnnotation {
+			t.Errorf("expected needsAnnotation=false for already-annotated shoot")
+		}
+	})
 }

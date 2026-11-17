@@ -139,6 +139,7 @@ func main() {
 			isActive = hasVirtualGardenClient
 			if isActive {
 				crClient = releasePipelineCfg.TestShoot.VirtualGarden.Client
+				clientset = releasePipelineCfg.TestShoot.VirtualGarden.ClientSet
 			}
 
 		case ClusterSeed:
@@ -166,6 +167,7 @@ func main() {
 			isActive = releasePipelineCfg.RuntimeClusterClient != nil
 			if isActive {
 				crClient = releasePipelineCfg.RuntimeClusterClient
+				clientset = releasePipelineCfg.RuntimeClusterClientSet
 			}
 
 		case ClusterGlobal:
