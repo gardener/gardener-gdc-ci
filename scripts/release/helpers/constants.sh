@@ -11,6 +11,13 @@ export RELEASE_WORK_DIR="${RELEASE_WORK_DIR:-/tmp/gardener-gdc-release}"
 export RELEASE_ARTIFACTS_DIR="${RELEASE_ARTIFACTS_DIR:-${RELEASE_WORK_DIR}/artifacts}"
 mkdir -p "${RELEASE_WORK_DIR}" "${RELEASE_ARTIFACTS_DIR}"
 
+# Failed-stage cluster snapshots can contain sensitive cluster state. They are kept outside
+# RELEASE_ARTIFACTS_DIR and must never be published as workflow artifacts of this public repository.
+export RELEASE_SNAPSHOTS_DIR="${RELEASE_SNAPSHOTS_DIR:-${RELEASE_WORK_DIR}/snapshots}"
+# Optional private GCS bucket that additionally receives the cluster snapshots and the conformance
+# results (requires Google Cloud application default credentials). Empty disables GCS uploads.
+export DIAGNOSTICS_GCS_BUCKET="${DIAGNOSTICS_GCS_BUCKET:-}"
+
 # Configuration files
 export PIPELINE_CONFIG_FILE="${PIPELINE_CONFIG_FILE:-${REPO_ROOT}/pipeline-configurations/staging-release-pipeline-configuration.yaml}"
 export BASE_SNAPSHOT_CONFIG_FILE="${BASE_SNAPSHOT_CONFIG_FILE:-${REPO_ROOT}/snapshot-configurations/base-snapshot-configuration.yaml}"

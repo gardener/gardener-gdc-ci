@@ -18,6 +18,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -60,7 +61,7 @@ type SnapshotClients struct {
 
 // CaptureOptions defines optional parameters for capturing snapshots.
 type CaptureOptions struct {
-	// Config defines the resources to capture. If nil, all known resources are discovered and captured.
+	// Config defines the resources to capture. If nil, all known resources except Secrets are discovered and captured.
 	Config *ClusterSnapshotConfig
 }
 
@@ -100,6 +101,10 @@ func CaptureSnapshotToDir(ctx context.Context, clients SnapshotClients, dir stri
 			gv, err := schema.ParseGroupVersion(res.APIVersion)
 			if err != nil {
 				return fmt.Errorf("failed to parse apiVersion %s: %w", res.APIVersion, err)
+			}
+			if isSecret(gv.Group, res.Kind) {
+				log.Printf("Skipping %s %s: Secrets are never captured in snapshots", res.APIVersion, res.Kind)
+				continue
 			}
 			mapping, err := clients.CRClient.RESTMapper().RESTMapping(schema.GroupKind{Group: gv.Group, Kind: res.Kind}, gv.Version)
 			if err != nil {
@@ -223,29 +228,96 @@ func capturePodLogs(ctx context.Context, clientset kubernetes.Interface, ns stri
 	return nil
 }
 
-// UploadArchive bundles the contents of srcDir into a tar.gz archive and uploads it to GCS.
-func UploadArchive(ctx context.Context, srcDir string, upload *DestinationConfig, prefix string) error {
-	if upload.Bucket == "" {
-		return fmt.Errorf("upload bucket must be specified")
+// ArchiveDestinations selects where PersistArchive stores a snapshot archive.
+type ArchiveDestinations struct {
+	// LocalDir is a local directory that receives the archive. An empty value disables local persistence.
+	LocalDir string
+	// Upload is the GCS destination. A nil value or an empty Bucket disables the upload.
+	Upload *DestinationConfig
+}
+
+// PersistArchive bundles the contents of srcDir into a single timestamped tar.gz archive and hands that same
+// file to every configured destination. It returns an error if no destination is configured or if none of them
+// received the archive; the failure of one destination is only logged as long as another one succeeded.
+func PersistArchive(ctx context.Context, srcDir, prefix string, dest ArchiveDestinations) error {
+	uploadEnabled := dest.Upload != nil && dest.Upload.Bucket != ""
+	if dest.LocalDir == "" && !uploadEnabled {
+		return fmt.Errorf("no snapshot destination configured: a local directory or a GCS bucket is required")
 	}
 
-	archivePath := filepath.Join(srcDir, "snapshots-archive.tar.gz")
-	log.Printf("Creating tar archive at %s", archivePath)
+	archiveName := snapshotArchiveName(prefix, time.Now().Format("20060102-150405"))
+
+	var (
+		archivePath string
+		persisted   bool
+		failures    []error
+	)
+
+	if dest.LocalDir != "" {
+		path, err := writeArchive(srcDir, dest.LocalDir, archiveName)
+		if err != nil {
+			log.Printf("Warning: Failed to save snapshot archive to %s: %v", dest.LocalDir, err)
+			failures = append(failures, err)
+		} else {
+			log.Printf("Saved snapshot archive to %s", path)
+			archivePath = path
+			persisted = true
+		}
+	}
+
+	if uploadEnabled {
+		if err := uploadArchive(ctx, srcDir, archivePath, archiveName, dest.Upload); err != nil {
+			log.Printf("Warning: Failed to upload snapshot archive to gs://%s: %v", dest.Upload.Bucket, err)
+			failures = append(failures, err)
+		} else {
+			persisted = true
+		}
+	}
+
+	if !persisted {
+		return fmt.Errorf("snapshot archive was not persisted to any destination: %w", errors.Join(failures...))
+	}
+	return nil
+}
+
+// writeArchive bundles the contents of srcDir into destDir/archiveName, creating destDir if necessary.
+func writeArchive(srcDir, destDir, archiveName string) (string, error) {
+	if err := os.MkdirAll(destDir, defaultDirPermissions); err != nil {
+		return "", fmt.Errorf("failed to create archive directory %s: %w", destDir, err)
+	}
+	archivePath := filepath.Join(destDir, archiveName)
+	log.Printf("Creating snapshot archive at %s", archivePath)
 	if err := createArchive(srcDir, archivePath); err != nil {
-		return fmt.Errorf("failed to create archive: %w", err)
+		return "", fmt.Errorf("failed to create archive: %w", err)
+	}
+	return archivePath, nil
+}
+
+// uploadArchive uploads the snapshot archive to GCS. It reuses archivePath when a local copy already exists and
+// otherwise stages the archive in a temporary directory for the duration of the upload.
+func uploadArchive(ctx context.Context, srcDir, archivePath, archiveName string, upload *DestinationConfig) error {
+	if archivePath == "" {
+		stagingDir, err := os.MkdirTemp("", "snapshot-archive-*")
+		if err != nil {
+			return fmt.Errorf("failed to create staging directory for the upload: %w", err)
+		}
+		defer os.RemoveAll(stagingDir)
+
+		archivePath, err = writeArchive(srcDir, stagingDir, archiveName)
+		if err != nil {
+			return err
+		}
 	}
 
-	timestamp := time.Now().Format("20060102-150405")
 	options := gcs.UploadOptions{
 		BucketName:    upload.Bucket,
-		ObjectName:    filepath.Join(upload.DestDir, snapshotArchiveName(prefix, timestamp)),
+		ObjectName:    filepath.Join(upload.DestDir, archiveName),
 		LocalFilePath: archivePath,
 	}
 	log.Printf("Uploading snapshot archive to GCS bucket %s (Object: %s)", options.BucketName, options.ObjectName)
 	if err := uploadFile(ctx, options); err != nil {
 		return fmt.Errorf("failed to upload snapshot archive to GCS: %w", err)
 	}
-
 	return nil
 }
 
@@ -413,8 +485,14 @@ func getNamespaces(ctx context.Context, k8sClient client.Client, target Namespac
 	return namespaces, nil
 }
 
+// isSecret reports whether group and kind identify core/v1 Secrets. Secrets are never captured because their
+// payload would end up verbatim in the snapshot archive.
+func isSecret(group, kind string) bool {
+	return group == corev1.GroupName && strings.EqualFold(kind, "Secret")
+}
+
 // discoverKnownAPIs traverses the client's Scheme and RESTMapper to dynamically identify
-// all available APIs installed on this client, returning them as ResourceTargets.
+// all available APIs installed on this client, returning them as ResourceTargets. Secrets are excluded.
 func discoverKnownAPIs(crClient client.Client) []ResourceTarget {
 	var discoveredResources []ResourceTarget
 	if crClient == nil {
@@ -424,6 +502,9 @@ func discoverKnownAPIs(crClient client.Client) []ResourceTarget {
 	seen := make(map[string]bool)
 	for gvk := range crClient.Scheme().AllKnownTypes() {
 		if gvk.Version == "" || gvk.Version == "__internal" || strings.HasSuffix(gvk.Kind, "List") {
+			continue
+		}
+		if isSecret(gvk.Group, gvk.Kind) {
 			continue
 		}
 

@@ -141,28 +141,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Authenticate to Google Cloud (GKE Virtual Garden Runtime Clusters & GCS)
-        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f # v2.1.7
-        with:
-          credentials_json: ${{ secrets.GCP_VIRTUAL_GARDEN_SERVICE_ACCOUNT_KEY }}
-
-      - name: Set up Google Cloud SDK & GKE Auth Plugin
-        uses: google-github-actions/setup-gcloud@6189d56e4096ee891640bb02ac264be376592d6a # v2.1.2
-        with:
-          install_components: 'gke-gcloud-auth-plugin'
-
-      # google-github-actions/auth exports CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE instead of
-      # activating the service account in gcloud's credential store. Since Google Cloud SDK
-      # 591.0.0, `gcloud config config-helper` (invoked by gke-gcloud-auth-plugin) persists
-      # the refreshed credential back to the store and crashes on file-override credentials:
-      #   AttributeError: 'Credentials' object has no attribute 'private_key_id'
-      # Activate the service account explicitly and clear the override so the plugin reads
-      # the stored credential instead. GOOGLE_APPLICATION_CREDENTIALS remains set for ADC users.
-      - name: Activate GCP Service Account in gcloud credential store
-        run: |
-          gcloud auth activate-service-account --key-file="${GOOGLE_GHA_CREDS_PATH}"
-          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=" >> "${GITHUB_ENV}"
-
       - name: Stage 1 - Build & Push Candidate Artifacts to GHCR
         id: stage_build
         run: ./scripts/release/1-build_and_push_artifacts.sh
@@ -191,6 +169,19 @@ jobs:
         id: stage_teardown
         if: always()
         run: ./scripts/release/7-teardown_gardener.sh
+
+      # Only the Sonobuoy conformance results are published. Artifacts of a public repository are
+      # world-readable, so failed-stage cluster snapshots (which can hold sensitive cluster state)
+      # stay on the runner. A failed upload must not block the promotion stages below.
+      - name: Upload Conformance Results
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdc-release-conformance-results-${{ github.run_attempt }}
+          path: /tmp/gardener-gdc-release/artifacts/diagnostics/conformance
+          if-no-files-found: ignore
+          retention-days: 90
 
       - name: Determine Gardener OCI Registry Parameters
         id: gardener_params

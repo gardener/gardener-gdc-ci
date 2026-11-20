@@ -42,6 +42,11 @@ type GDCConfig struct {
 	// This list is used to configure the availability zones for the Multi-Zone shoot cluster created by the pipeline.
 	Zones []string `yaml:"zones"`
 
+	// VirtualGardenClusters is a list of GDC user clusters that host Virtual Garden
+	// clusters available for the pipeline. Supports one or multiple Virtual Garden
+	// runtime clusters in the pool.
+	VirtualGardenClusters []RuntimeClusterConfig `yaml:"virtualGardenClusters"`
+
 	// UserClusters is a list of GDC user clusters available for the pipeline.
 	// These userClusters must host Gardener landscapes whose Shoot clusters will be used to host the seed cluster created by the pipeline.
 	UserClusters []RuntimeClusterConfig `yaml:"userClusters"`

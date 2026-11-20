@@ -22,6 +22,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	gardencorev1 "github.com/gardener/gardener/pkg/apis/core/v1"
@@ -53,7 +55,38 @@ func (f *fakeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return f.response, nil
 }
 
+// restoreLoaderDependencies restores the package-level function variables that tests replace with test doubles
+// once the calling test has finished, so that doubles (some of which capture t) do not leak into later tests.
+func restoreLoaderDependencies(t *testing.T) {
+	t.Helper()
+
+	origGetShootKubeconfig := gardenerinternal.GetShootKubeconfig
+	origGetGKEClusterClients := getGKEClusterClients
+	origGdcloudInit := gdcloudInit
+	origGetGDCUserClusterClients := commonConfig.GetGDCUserClusterClients
+	origGetGardenClient := commonConfig.GetGardenClient
+	origGetGlobalClient := commonConfig.GetGlobalClient
+	origGetManagementClient := commonConfig.GetManagementClient
+	origAccessLatestSecret := commonConfig.AccessLatestSecret
+	origFetchGDCCAData := commonConfig.FetchGDCCAData
+	origGetGDCClientWithLocalFallback := commonConfig.GetGDCClientWithLocalFallback
+
+	t.Cleanup(func() {
+		gardenerinternal.GetShootKubeconfig = origGetShootKubeconfig
+		getGKEClusterClients = origGetGKEClusterClients
+		gdcloudInit = origGdcloudInit
+		commonConfig.GetGDCUserClusterClients = origGetGDCUserClusterClients
+		commonConfig.GetGardenClient = origGetGardenClient
+		commonConfig.GetGlobalClient = origGetGlobalClient
+		commonConfig.GetManagementClient = origGetManagementClient
+		commonConfig.AccessLatestSecret = origAccessLatestSecret
+		commonConfig.FetchGDCCAData = origFetchGDCCAData
+		commonConfig.GetGDCClientWithLocalFallback = origGetGDCClientWithLocalFallback
+	})
+}
+
 func TestLoadReleaseTestConfig(t *testing.T) {
+	restoreLoaderDependencies(t)
 	gardenerinternal.GetShootKubeconfig = func(ctx context.Context, gardenClient client.Client, shootKey client.ObjectKey) ([]byte, error) {
 		return []byte("fake-kubeconfig-data"), nil
 	}
@@ -260,7 +293,7 @@ gdc:
 	// Execute the function under test
 	// Override the package-level function variables with mock implementations.
 	gardenerArtifactsVersion := "abcdefg"
-	config, err := LoadReleaseTestConfig(tmpFile.Name(), gardenerArtifactsVersion, WithClusterAllocation())
+	config, err := LoadReleaseTestConfig(tmpFile.Name(), gardenerArtifactsVersion, WithClusterAllocation(), WithVirtualGardenProvider(VirtualGardenProviderGKE))
 
 	// Assertions
 	if err != nil {
@@ -339,6 +372,7 @@ gdc:
 }
 
 func TestLoadReleaseTestConfig_NoAllocation(t *testing.T) {
+	restoreLoaderDependencies(t)
 	gardenerinternal.GetShootKubeconfig = func(ctx context.Context, gardenClient client.Client, shootKey client.ObjectKey) ([]byte, error) {
 		return []byte("fake-kubeconfig-data"), nil
 	}
@@ -406,13 +440,14 @@ gdc:
 	tmpFile.Close()
 
 	// Test with allocateNewClusters = false (default)
-	_, err := LoadReleaseTestConfig(tmpFile.Name(), "new-hash")
+	_, err := LoadReleaseTestConfig(tmpFile.Name(), "new-hash", WithVirtualGardenProvider(VirtualGardenProviderGKE))
 	if err == nil {
 		t.Error("Expected error when no matching cluster found and allocation disabled, got nil")
 	}
 }
 
 func TestLoadReleaseTestConfig_MissingSeed(t *testing.T) {
+	restoreLoaderDependencies(t)
 	// Setup similar to TestLoadReleaseTestConfig but ensure seed selection fails
 	gardenerinternal.GetShootKubeconfig = func(ctx context.Context, gardenClient client.Client, shootKey client.ObjectKey) ([]byte, error) {
 		return []byte("fake-kubeconfig-data"), nil
@@ -473,7 +508,7 @@ gdc:
 
 	// Run with allocation enabled
 	gardenerArtifactsVersion := "missing-seed-test-hash"
-	_, err := LoadReleaseTestConfig(tmpFile.Name(), gardenerArtifactsVersion, WithClusterAllocation())
+	_, err := LoadReleaseTestConfig(tmpFile.Name(), gardenerArtifactsVersion, WithClusterAllocation(), WithVirtualGardenProvider(VirtualGardenProviderGKE))
 
 	// Expect error because seed selection failure should fail configuration loading unless WithOnlyGarden is set
 	if err == nil {
@@ -492,7 +527,7 @@ gdc:
 	}
 
 	// Run with WithOnlyGarden enabled -> should succeed and annotate garden
-	config, err := LoadReleaseTestConfig(tmpFile.Name(), gardenerArtifactsVersion, WithClusterAllocation(), WithOnlyGarden())
+	config, err := LoadReleaseTestConfig(tmpFile.Name(), gardenerArtifactsVersion, WithClusterAllocation(), WithOnlyGarden(), WithVirtualGardenProvider(VirtualGardenProviderGKE))
 	if err != nil {
 		t.Fatalf("Expected no error when WithOnlyGarden is enabled, got %v", err)
 	}
@@ -515,6 +550,7 @@ gdc:
 }
 
 func TestLoadReleaseTestConfig_UseUserClusterAsSeed(t *testing.T) {
+	restoreLoaderDependencies(t)
 	gardenerinternal.GetShootKubeconfig = func(ctx context.Context, gardenClient client.Client, shootKey client.ObjectKey) ([]byte, error) {
 		return []byte("fake-kubeconfig-data"), nil
 	}
@@ -637,5 +673,479 @@ gdc:
 	shootAnnotations := updatedShoot.GetAnnotations()
 	if _, ok := shootAnnotations[CommitHashAnnotation]; ok {
 		t.Errorf("Expected unannotated-shoot to have no %s annotation, but got %v", CommitHashAnnotation, shootAnnotations)
+	}
+}
+
+func TestLoadReleaseTestConfig_GDCVirtualGardenClusters(t *testing.T) {
+	restoreLoaderDependencies(t)
+
+	s := runtime.NewScheme()
+	_ = operatorv1alpha1.AddToScheme(s)
+	_ = gardencorev1beta1.AddToScheme(s)
+	_ = gardencorev1.AddToScheme(s)
+	_ = corev1.AddToScheme(s)
+
+	busyVGGarden := &operatorv1alpha1.Garden{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gardener-grover-4-busy",
+			Annotations: map[string]string{
+				CommitHashAnnotation: "other-active-version",
+			},
+		},
+	}
+	idleVGGarden1 := &operatorv1alpha1.Garden{
+		ObjectMeta: metav1.ObjectMeta{Name: "gardener-grover-4"},
+	}
+	idleVGGarden2 := &operatorv1alpha1.Garden{
+		ObjectMeta: metav1.ObjectMeta{Name: "gardener-grover-5"},
+	}
+	permanentSoilGarden := &operatorv1alpha1.Garden{
+		ObjectMeta: metav1.ObjectMeta{Name: "gardener-grover-3"},
+	}
+	soilShoot := &gardencorev1beta1.Shoot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sh-grv-1-a",
+			Namespace: "garden",
+		},
+		Spec: gardencorev1beta1.ShootSpec{
+			Networking: &gardencorev1beta1.Networking{
+				Pods:     ptr.To("100.64.0.0/16"),
+				Services: ptr.To("100.65.0.0/16"),
+			},
+		},
+	}
+
+	vgRuntimeBusy := fake.NewClientBuilder().WithScheme(s).WithObjects(busyVGGarden).Build()
+	vgRuntimeIdle1 := fake.NewClientBuilder().WithScheme(s).WithObjects(idleVGGarden1).Build()
+	vgRuntimeIdle2 := fake.NewClientBuilder().WithScheme(s).WithObjects(idleVGGarden2).Build()
+	soilRuntime := fake.NewClientBuilder().WithScheme(s).WithObjects(permanentSoilGarden).Build()
+
+	vgGardenClient1 := fake.NewClientBuilder().WithScheme(s).Build()
+	vgGardenClient2 := fake.NewClientBuilder().WithScheme(s).Build()
+	soilGardenClient := fake.NewClientBuilder().WithScheme(s).WithObjects(soilShoot).Build()
+
+	getGKEClusterClients = func(userClusters []commonConfig.RuntimeClusterConfig) (map[string]client.WithWatch, error) {
+		t.Fatalf("getGKEClusterClients should not be called when GDC virtualGardenClusters are configured")
+		return nil, nil
+	}
+	commonConfig.GetGDCUserClusterClients = func(userClusters []commonConfig.RuntimeClusterConfig, _ *gdcloud.TestingClient) (map[string]client.WithWatch, error) {
+		res := make(map[string]client.WithWatch, len(userClusters))
+		for _, uc := range userClusters {
+			switch uc.Name {
+			case "gardener-grover-busy":
+				res[uc.Name] = vgRuntimeBusy
+			case "gardener-grover-4":
+				res[uc.Name] = vgRuntimeIdle1
+			case "gardener-grover-5":
+				res[uc.Name] = vgRuntimeIdle2
+			case "gardener-grover-3":
+				res[uc.Name] = soilRuntime
+			default:
+				return nil, fmt.Errorf("unexpected cluster %q", uc.Name)
+			}
+		}
+		return res, nil
+	}
+	commonConfig.GetGardenClient = func(ctx context.Context, userClusterClient client.Client) (*commonConfig.VirtualGardenConfig, error) {
+		switch userClusterClient {
+		case vgRuntimeIdle1:
+			return &commonConfig.VirtualGardenConfig{Client: vgGardenClient1, Host: "https://vg-4.example.com", CAData: []byte("ca-4")}, nil
+		case vgRuntimeIdle2:
+			return &commonConfig.VirtualGardenConfig{Client: vgGardenClient2, Host: "https://vg-5.example.com", CAData: []byte("ca-5")}, nil
+		case soilRuntime:
+			return &commonConfig.VirtualGardenConfig{Client: soilGardenClient, Host: "https://soil-3.example.com", CAData: []byte("ca-3")}, nil
+		default:
+			return nil, fmt.Errorf("unexpected runtime client")
+		}
+	}
+	commonConfig.GetGlobalClient = func(_ *gdcloud.TestingClient) (client.WithWatch, error) {
+		return fake.NewClientBuilder().Build(), nil
+	}
+	commonConfig.GetManagementClient = func(_ *gdcloud.TestingClient, _, _ string) (client.WithWatch, error) {
+		return fake.NewClientBuilder().Build(), nil
+	}
+	gdcloudInit = func(_ context.Context, _ *pipelineConfig) (*gdcloud.TestingClient, error) { return nil, nil }
+	commonConfig.AccessLatestSecret = func(_ context.Context, _ string) ([]byte, error) { return []byte("conf"), nil }
+	commonConfig.FetchGDCCAData = func(_ string) (string, error) { return "mock-ca", nil }
+
+	yamlContent := `
+gdc:
+  project: "sapbtp"
+  org: "gdc1"
+  region: "us-west6"
+  zones: ["us-west6-a"]
+  globalAPIURL: "https://global-api.example.com"
+  consoleURL: "https://console.example.com"
+  harborRegistryURL: "harbor.example.com/sap-gardener"
+  virtualGardenClusters:
+    - name: "gardener-grover-busy"
+      zone: "us-west6-a"
+      project: "sapbtp"
+    - name: "gardener-grover-4"
+      zone: "us-west6-a"
+      project: "sapbtp"
+    - name: "gardener-grover-5"
+      zone: "us-west6-a"
+      project: "sapbtp"
+  userClusters:
+    - name: "gardener-grover-3"
+      zone: "us-west6-a"
+      project: "sapbtp"
+`
+	tmpFile, err := os.CreateTemp("", "gdc-vg-config-*.yaml")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.Write([]byte(yamlContent)); err != nil {
+		t.Fatalf("Failed to write temp file: %v", err)
+	}
+	_ = tmpFile.Close()
+
+	targetVersion := "v0.5.3-dev-gdc1234"
+	cfg, err := LoadReleaseTestConfig(tmpFile.Name(), targetVersion, WithClusterAllocation())
+	if err != nil {
+		t.Fatalf("LoadReleaseTestConfig() returned unexpected error: %v", err)
+	}
+
+	if cfg.RuntimeClusterName != "gardener-grover-4" {
+		t.Errorf("got RuntimeClusterName %q, want %q (first idle cluster in slice order)", cfg.RuntimeClusterName, "gardener-grover-4")
+	}
+	if cfg.TestShoot.VirtualGarden.Client != vgGardenClient1 {
+		t.Errorf("expected VirtualGarden client for gardener-grover-4")
+	}
+	if cfg.Seed == nil || cfg.Seed.HostCluster == nil || cfg.Seed.HostCluster.Shoot == nil {
+		t.Fatalf("expected remote Shoot seed host configuration, got %+v", cfg.Seed)
+	}
+	if cfg.Seed.HostCluster.Shoot.Name != "sh-grv-1-a" {
+		t.Errorf("got Seed host Shoot %q, want %q", cfg.Seed.HostCluster.Shoot.Name, "sh-grv-1-a")
+	}
+
+	// Verify gardener-grover-4 Garden was annotated, while permanent soil Garden on gardener-grover-3 was NOT touched.
+	gotVG := &operatorv1alpha1.Garden{}
+	if err := vgRuntimeIdle1.Get(context.Background(), client.ObjectKey{Name: "gardener-grover-4"}, gotVG); err != nil {
+		t.Fatalf("failed to get gardener-grover-4 Garden: %v", err)
+	}
+	if gotVG.GetAnnotations()[CommitHashAnnotation] != targetVersion {
+		t.Errorf("got gardener-grover-4 annotation %q, want %q", gotVG.GetAnnotations()[CommitHashAnnotation], targetVersion)
+	}
+
+	gotSoilGarden := &operatorv1alpha1.Garden{}
+	if err := soilRuntime.Get(context.Background(), client.ObjectKey{Name: "gardener-grover-3"}, gotSoilGarden); err != nil {
+		t.Fatalf("failed to get permanent soil Garden: %v", err)
+	}
+	if _, annotated := gotSoilGarden.GetAnnotations()[CommitHashAnnotation]; annotated {
+		t.Errorf("permanent soil Garden on gardener-grover-3 must not be annotated, got %v", gotSoilGarden.GetAnnotations())
+	}
+}
+
+func TestLoadReleaseTestConfig_RejectsInvalidVirtualGardenSelection(t *testing.T) {
+	restoreLoaderDependencies(t)
+
+	// An invalid selection must be rejected before any cluster is contacted, claimed or annotated.
+	commonConfig.FetchGDCCAData = func(string) (string, error) {
+		t.Error("FetchGDCCAData must not be called for an invalid Virtual Garden selection")
+		return "", fmt.Errorf("unexpected call")
+	}
+	gdcloudInit = func(context.Context, *pipelineConfig) (*gdcloud.TestingClient, error) {
+		t.Error("gdcloudInit must not be called for an invalid Virtual Garden selection")
+		return nil, fmt.Errorf("unexpected call")
+	}
+	getGKEClusterClients = func([]commonConfig.RuntimeClusterConfig) (map[string]client.WithWatch, error) {
+		t.Error("getGKEClusterClients must not be called for an invalid Virtual Garden selection")
+		return nil, fmt.Errorf("unexpected call")
+	}
+	commonConfig.GetGDCUserClusterClients = func([]commonConfig.RuntimeClusterConfig, *gdcloud.TestingClient) (map[string]client.WithWatch, error) {
+		t.Error("GetGDCUserClusterClients must not be called for an invalid Virtual Garden selection")
+		return nil, fmt.Errorf("unexpected call")
+	}
+
+	const gdcBase = `
+gdc:
+  project: "p"
+  org: "o"
+  region: "r"
+  zones: ["z"]
+  globalAPIURL: "u"
+  consoleURL: "c"
+  harborRegistryURL: "h"
+  userClusters: [{name: "soil-cluster", zone: "z", project: "p"}]
+`
+	const gkePool = `
+gcp:
+  gkeClusters: [{name: "gke-cluster", zone: "z", project: "p"}]
+`
+
+	tests := []struct {
+		name    string
+		config  string
+		opts    []Option
+		wantErr string
+	}{
+		{
+			name:    "unknown provider",
+			config:  gkePool + gdcBase,
+			opts:    []Option{WithVirtualGardenProvider("gcp")},
+			wantErr: `unsupported virtual garden provider "gcp"`,
+		},
+		{
+			name:    "provider is case-sensitive",
+			config:  gkePool + gdcBase,
+			opts:    []Option{WithVirtualGardenProvider("GDC")},
+			wantErr: `unsupported virtual garden provider "GDC"`,
+		},
+		{
+			name:    "gdc provider without virtualGardenClusters does not fall back to the Soil pool",
+			config:  gdcBase,
+			opts:    []Option{WithVirtualGardenProvider(VirtualGardenProviderGDC), WithClusterAllocation()},
+			wantErr: "gdc.virtualGardenClusters must be configured",
+		},
+		{
+			name:    "misspelled virtualGardenClusters key",
+			config:  gdcBase + `  virtualGardenCluster: [{name: "vg-cluster", zone: "z", project: "p"}]` + "\n",
+			opts:    []Option{WithVirtualGardenProvider(VirtualGardenProviderGDC), WithClusterAllocation()},
+			wantErr: "gdc.virtualGardenClusters must be configured",
+		},
+		{
+			name:    "provider defaults to gdc even when only gkeClusters are configured",
+			config:  gkePool + gdcBase,
+			opts:    []Option{WithClusterAllocation()},
+			wantErr: "gdc.virtualGardenClusters must be configured",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "pipeline-config.yaml")
+			if err := os.WriteFile(configPath, []byte(tc.config), 0600); err != nil {
+				t.Fatalf("Failed to write config file: %v", err)
+			}
+
+			cfg, err := LoadReleaseTestConfig(configPath, "v0.5.3-dev-invalid1", tc.opts...)
+			if err == nil {
+				t.Fatalf("LoadReleaseTestConfig() = %+v, want error containing %q", cfg, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("LoadReleaseTestConfig() error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCLIConfig_GetStatus_GDCVirtualGardenClusters(t *testing.T) {
+	restoreLoaderDependencies(t)
+
+	s := runtime.NewScheme()
+	_ = operatorv1alpha1.AddToScheme(s)
+	_ = gardencorev1beta1.AddToScheme(s)
+	_ = corev1.AddToScheme(s)
+
+	activeVer := "v0.5.3-dev-active1"
+	activeGarden := &operatorv1alpha1.Garden{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "gardener-grover-4",
+			Annotations: map[string]string{CommitHashAnnotation: activeVer},
+		},
+	}
+	idleGarden := &operatorv1alpha1.Garden{
+		ObjectMeta: metav1.ObjectMeta{Name: "gardener-grover-5"},
+	}
+	createdSeed := &gardencorev1beta1.Seed{
+		ObjectMeta: metav1.ObjectMeta{Name: "seed-active1"},
+	}
+	createdShoot := &gardencorev1beta1.Shoot{
+		ObjectMeta: metav1.ObjectMeta{Name: "sh-active1", Namespace: "garden"},
+	}
+	claimedSoilShoot := &gardencorev1beta1.Shoot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "sh-grv-1-a",
+			Namespace:   "garden",
+			Annotations: map[string]string{CommitHashAnnotation: activeVer},
+		},
+	}
+	idleSoilShoot := &gardencorev1beta1.Shoot{
+		ObjectMeta: metav1.ObjectMeta{Name: "sh-grv-2-a", Namespace: "garden"},
+	}
+
+	vgActiveRuntime := fake.NewClientBuilder().WithScheme(s).WithObjects(activeGarden).Build()
+	vgIdleRuntime := fake.NewClientBuilder().WithScheme(s).WithObjects(idleGarden).Build()
+	soilRuntime := fake.NewClientBuilder().WithScheme(s).Build()
+
+	vgActiveGardenClient := fake.NewClientBuilder().WithScheme(s).WithObjects(createdSeed, createdShoot).Build()
+	soilGardenClient := fake.NewClientBuilder().WithScheme(s).WithObjects(claimedSoilShoot, idleSoilShoot).Build()
+
+	getGKEClusterClients = func(userClusters []commonConfig.RuntimeClusterConfig) (map[string]client.WithWatch, error) {
+		t.Fatalf("getGKEClusterClients must not be called when GCP.GKEClusters is empty")
+		return nil, nil
+	}
+	commonConfig.GetGDCUserClusterClients = func(userClusters []commonConfig.RuntimeClusterConfig, _ *gdcloud.TestingClient) (map[string]client.WithWatch, error) {
+		res := make(map[string]client.WithWatch, len(userClusters))
+		for _, uc := range userClusters {
+			switch uc.Name {
+			case "gardener-grover-4":
+				res[uc.Name] = vgActiveRuntime
+			case "gardener-grover-5":
+				res[uc.Name] = vgIdleRuntime
+			case "gardener-grover-3":
+				res[uc.Name] = soilRuntime
+			}
+		}
+		return res, nil
+	}
+	commonConfig.GetGardenClient = func(_ context.Context, runtimeClient client.Client) (*commonConfig.VirtualGardenConfig, error) {
+		switch runtimeClient {
+		case vgActiveRuntime:
+			return &commonConfig.VirtualGardenConfig{Client: vgActiveGardenClient}, nil
+		case soilRuntime:
+			return &commonConfig.VirtualGardenConfig{Client: soilGardenClient}, nil
+		default:
+			return nil, fmt.Errorf("unexpected client")
+		}
+	}
+
+	cliCfg := &CLIConfig{
+		pipelineConfig: &pipelineConfig{
+			GDC: commonConfig.GDCConfig{
+				VirtualGardenClusters: []commonConfig.RuntimeClusterConfig{
+					{Name: "gardener-grover-4", Zone: "us-west6-a", Project: "sapbtp"},
+					{Name: "gardener-grover-5", Zone: "us-west6-a", Project: "sapbtp"},
+				},
+				UserClusters: []commonConfig.RuntimeClusterConfig{
+					{Name: "gardener-grover-3", Zone: "us-west6-a", Project: "sapbtp"},
+				},
+			},
+		},
+	}
+
+	activeJobs, avail, err := cliCfg.GetStatus(context.Background())
+	if err != nil {
+		t.Fatalf("GetStatus() returned error: %v", err)
+	}
+	if len(activeJobs) != 1 {
+		t.Fatalf("got %d active jobs, want 1", len(activeJobs))
+	}
+	if activeJobs[0].VirtualGarden != "gardener-grover-4" {
+		t.Errorf("got VirtualGarden %q, want %q", activeJobs[0].VirtualGarden, "gardener-grover-4")
+	}
+	if activeJobs[0].SoilCluster == "" {
+		t.Errorf("expected SoilCluster to be populated on active job")
+	}
+	if len(avail) != 2 {
+		t.Fatalf("got %d available clusters, want 2: %+v", len(avail), avail)
+	}
+	if avail[0].Name != "gardener-grover-5" || avail[0].Type != "GDC (Virtual Garden Host)" {
+		t.Errorf("unexpected available[0]: %+v", avail[0])
+	}
+	if avail[1].Name != "sh-grv-2-a" || avail[1].Type != "Shoot (Seed Host)" {
+		t.Errorf("unexpected available[1]: %+v", avail[1])
+	}
+}
+
+func TestLoadReleaseTestConfig_LocalGDCloudFallbackAndSkipPullCredentials(t *testing.T) {
+	restoreLoaderDependencies(t)
+
+	s := runtime.NewScheme()
+	_ = operatorv1alpha1.AddToScheme(s)
+	_ = gardencorev1beta1.AddToScheme(s)
+	_ = corev1.AddToScheme(s)
+
+	ver := "v0.5.3-dev-teardown1"
+	gardenObj := &operatorv1alpha1.Garden{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "gardener-grover-4",
+			Namespace:   "garden",
+			Annotations: map[string]string{CommitHashAnnotation: ver},
+		},
+	}
+	podsCIDR := "100.96.0.0/16"
+	servicesCIDR := "100.64.0.0/13"
+	soilShoot := &gardencorev1beta1.Shoot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "sh-grv-1-a",
+			Namespace:   "garden",
+			Annotations: map[string]string{CommitHashAnnotation: ver},
+		},
+		Spec: gardencorev1beta1.ShootSpec{
+			Networking: &gardencorev1beta1.Networking{
+				Pods:     &podsCIDR,
+				Services: &servicesCIDR,
+			},
+		},
+	}
+
+	vgRuntime := fake.NewClientBuilder().WithScheme(s).WithObjects(gardenObj).Build()
+	soilRuntime := fake.NewClientBuilder().WithScheme(s).Build()
+	vgClient := fake.NewClientBuilder().WithScheme(s).Build()
+	soilVGClient := fake.NewClientBuilder().WithScheme(s).WithObjects(soilShoot).Build()
+
+	usedLocalFallback := false
+	commonConfig.GetGDCClientWithLocalFallback = func(_ context.Context, _, _ string) (*gdcloud.TestingClient, error) {
+		usedLocalFallback = true
+		return &gdcloud.TestingClient{}, nil
+	}
+	commonConfig.AccessLatestSecret = func(_ context.Context, secretName string) ([]byte, error) {
+		t.Fatalf("AccessLatestSecret(%q) must not be called when using local gdcloud fallback and skipping pull credentials", secretName)
+		return nil, nil
+	}
+	commonConfig.GetGDCUserClusterClients = func(userClusters []commonConfig.RuntimeClusterConfig, _ *gdcloud.TestingClient) (map[string]client.WithWatch, error) {
+		res := make(map[string]client.WithWatch, len(userClusters))
+		for _, uc := range userClusters {
+			if uc.Name == "gardener-grover-4" {
+				res[uc.Name] = vgRuntime
+			} else {
+				res[uc.Name] = soilRuntime
+			}
+		}
+		return res, nil
+	}
+	commonConfig.GetGardenClient = func(_ context.Context, runtimeClient client.Client) (*commonConfig.VirtualGardenConfig, error) {
+		if runtimeClient == vgRuntime {
+			return &commonConfig.VirtualGardenConfig{Client: vgClient}, nil
+		}
+		return &commonConfig.VirtualGardenConfig{Client: soilVGClient}, nil
+	}
+	commonConfig.GetGlobalClient = func(_ *gdcloud.TestingClient) (client.WithWatch, error) {
+		return fake.NewClientBuilder().WithScheme(s).Build(), nil
+	}
+	commonConfig.GetManagementClient = func(_ *gdcloud.TestingClient, _, _ string) (client.WithWatch, error) {
+		return fake.NewClientBuilder().WithScheme(s).Build(), nil
+	}
+
+	cfgPath := filepath.Join(t.TempDir(), "cfg.yaml")
+	cfgYAML := `
+gdc:
+  project: sapbtp
+  org: gdc1
+  zones: [us-west6-a]
+  consoleURL: https://console.example.com
+  caData: ZmFrZS1jYQ==
+  virtualGardenClusters:
+    - name: gardener-grover-4
+      zone: us-west6-a
+      project: sapbtp
+  userClusters:
+    - name: gardener-grover-3
+      zone: us-west6-a
+      project: sapbtp
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0600); err != nil {
+		t.Fatalf("failed to write temp config YAML: %v", err)
+	}
+
+	cfg, err := LoadReleaseTestConfig(
+		cfgPath,
+		ver,
+		WithVirtualGardenProvider(VirtualGardenProviderGDC),
+		WithLocalGDCloudSessionFallback(),
+		WithSkipImagePullCredentials(),
+	)
+	if err != nil {
+		t.Fatalf("LoadReleaseTestConfig() unexpected error: %v", err)
+	}
+	if !usedLocalFallback {
+		t.Errorf("expected GetGDCClientWithLocalFallback to be invoked")
+	}
+	if len(cfg.ImagePullCredentials) != 0 {
+		t.Errorf("expected empty ImagePullCredentials when skipped, got %q", string(cfg.ImagePullCredentials))
 	}
 }

@@ -15,8 +15,14 @@ capture_snapshot() {
   local stage_name="${1:-unknown-stage}"
   local run_id="${GITHUB_RUN_ID:-local}"
   local dest_dir="release-pipeline-snapshots/${run_id}/${stage_name}"
+  local output_dir="${RELEASE_SNAPSHOTS_DIR}/${run_id}/${stage_name}"
+  local bucket="${DIAGNOSTICS_GCS_BUCKET:-}"
 
-  echo "Capturing cluster diagnostic snapshot for failed stage '${stage_name}' into gs://gardener-ci-pipeline/${dest_dir}..."
+  local destination="${output_dir}"
+  if [[ -n "${bucket}" ]]; then
+    destination+=" and gs://${bucket}/${dest_dir}"
+  fi
+  echo "Capturing cluster diagnostic snapshot for failed stage '${stage_name}' into ${destination}..."
   if [[ ! -f "${UPDATED_PIPELINE_CONFIG_FILE}" ]]; then
     echo "Updated pipeline config (${UPDATED_PIPELINE_CONFIG_FILE}) not found; skipping cluster snapshot."
     return 0
@@ -32,10 +38,15 @@ capture_snapshot() {
     artifacts_ver="$(yq -r '.gardenerArtifactsVersion' "${RELEASE_METADATA_FILE}")"
   fi
 
+  local vg_provider="${VIRTUAL_GARDEN_PROVIDER:-gdc}"
+
   "${snapshotter_cmd[@]}" \
     --release-configuration-file-path="${UPDATED_PIPELINE_CONFIG_FILE}" \
     --snapshot-config-path="${BASE_SNAPSHOT_CONFIG_FILE}" \
     --gardener-artifacts-version="${artifacts_ver}" \
+    --virtual-garden-provider="${vg_provider}" \
+    --output-dir="${output_dir}" \
+    --bucket="${bucket}" \
     --dest-dir="${dest_dir}" || \
     echo "Warning: Failed to capture full diagnostic snapshot for stage '${stage_name}'."
 }

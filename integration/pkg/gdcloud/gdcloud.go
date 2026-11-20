@@ -16,6 +16,8 @@ package gdcloud
 
 import (
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,8 +27,15 @@ import (
 
 const systemCABundlePath = "/etc/ssl/certs/ca-certificates.crt"
 
+var userHomeDir = os.UserHomeDir
+
 var gdcloudLocation = func() string {
 	if loc := os.Getenv("GDCLOUD_PATH"); loc != "" {
+		if info, err := os.Stat(loc); err == nil && info.IsDir() {
+			// GDCLOUD_PATH names the gdcloud SDK root. Always resolve to its binary so that a wrong directory
+			// fails with an error naming the missing <root>/bin/gdcloud instead of an exec error on the directory.
+			return filepath.Join(loc, "bin", "gdcloud")
+		}
 		return loc
 	}
 	return "gdcloud"
@@ -96,6 +105,121 @@ func NewTestingClient(caDataPath, serviceaccountPath string, consoleURL string) 
 		return nil, fmt.Errorf("%s, cannot execute gdcloud command: %w", result, err)
 	}
 	return c, nil
+}
+
+// NewTestingClientFromLocalSession initializes a hermetic gdcloud CLI client cloned from the
+// developer's existing local gdcloud session (~/.config/gdcloud and ~/.ais) so local CLI workflows
+// (such as teardown and status) work without service account keys or mutating global gdcloud state.
+func NewTestingClientFromLocalSession(caDataPath, consoleURL string) (client *TestingClient, err error) {
+	homeDir, err := userHomeDir()
+	if err != nil || homeDir == "" {
+		return nil, fmt.Errorf("failed to resolve user home directory for local gdcloud session: %w", err)
+	}
+	xdgConfigHome := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfigHome == "" {
+		xdgConfigHome = filepath.Join(homeDir, ".config")
+	}
+	localGDCloudDir := filepath.Join(xdgConfigHome, "gdcloud")
+	if info, statErr := os.Stat(localGDCloudDir); statErr != nil || !info.IsDir() {
+		return nil, fmt.Errorf("no local gdcloud session found at %q (run 'gdcloud auth login' or set GDC_RELEASE_SERVICE_ACCOUNT_KEY / GDC_SERVICE_ACCOUNT_FILE)", localGDCloudDir)
+	}
+
+	configDir, err := os.MkdirTemp("", "gdcloud-test-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp directory for gdcloud config: %w", err)
+	}
+
+	prevSSLCertFile, hadSSLCertFile := os.LookupEnv("SSL_CERT_FILE")
+	setSSLCertFile := false
+
+	defer func() {
+		if err != nil {
+			if setSSLCertFile {
+				restoreSSLCertFile(prevSSLCertFile, hadSSLCertFile)
+			}
+			os.RemoveAll(configDir)
+		}
+	}()
+
+	if err := copyDirRecursive(localGDCloudDir, filepath.Join(configDir, "gdcloud")); err != nil {
+		return nil, fmt.Errorf("failed to clone local gdcloud config directory %q: %w", localGDCloudDir, err)
+	}
+	localAISDir := filepath.Join(homeDir, ".ais")
+	if info, statErr := os.Stat(localAISDir); statErr == nil && info.IsDir() {
+		if err := copyDirRecursive(localAISDir, filepath.Join(configDir, ".ais")); err != nil {
+			return nil, fmt.Errorf("failed to clone local gdcloud token store %q: %w", localAISDir, err)
+		}
+	}
+
+	caBundlePath := buildCABundle(configDir, caDataPath)
+	if caBundlePath != "" {
+		_ = os.Setenv("SSL_CERT_FILE", caBundlePath)
+		setSSLCertFile = true
+	}
+
+	c := &TestingClient{
+		configDir:       configDir,
+		caDataPath:      caBundlePath,
+		prevSSLCertFile: prevSSLCertFile,
+		hadSSLCertFile:  hadSSLCertFile,
+		setSSLCertFile:  setSSLCertFile,
+	}
+
+	if result, err := c.Exec("config", "set", "core/disable_prompts", "true"); err != nil {
+		return nil, fmt.Errorf("%s, cannot execute gdcloud command: %w", result, err)
+	}
+	if result, err := c.Exec("config", "set", "auth/login_config_cert_path", caDataPath); err != nil {
+		return nil, fmt.Errorf("%s, cannot execute gdcloud command: %w", result, err)
+	}
+	if result, err := c.Exec("config", "set", "core/organization_console_url", consoleURL); err != nil {
+		return nil, fmt.Errorf("%s, cannot execute gdcloud command: %w", result, err)
+	}
+	return c, nil
+}
+
+func copyDirRecursive(srcDir, dstDir string) error {
+	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		targetPath := filepath.Join(dstDir, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		switch {
+		case mode.IsDir():
+			return os.MkdirAll(targetPath, mode.Perm()|0700)
+		case mode&os.ModeSymlink != 0:
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, targetPath)
+		case mode.IsRegular():
+			in, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer in.Close()
+			out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out, in); err != nil {
+				_ = out.Close()
+				return err
+			}
+			return out.Close()
+		default:
+			return nil
+		}
+	})
 }
 
 // buildCABundle combines the system CA bundle (if present) with the GDC CA certificate at caDataPath

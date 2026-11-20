@@ -33,18 +33,19 @@ CA_DATA_B64="$(base64 -w 0 < "${CA_FILE}")"
 cp "${PIPELINE_CONFIG_FILE}" "${UPDATED_PIPELINE_CONFIG_FILE}"
 yq -i ".gdc.caData = \"${CA_DATA_B64}\"" "${UPDATED_PIPELINE_CONFIG_FILE}"
 
-# Authenticate to all candidate GKE Virtual Garden runtime clusters so LoadReleaseTestConfig
-# can inspect existing Garden resources and allocate a free runtime cluster.
-GKE_COUNT="$(yq '.gcp.gkeClusters | length' "${UPDATED_PIPELINE_CONFIG_FILE}")"
-for ((i = 0; i < GKE_COUNT; i++)); do
-  CLUSTER_NAME="$(yq -r ".gcp.gkeClusters[${i}].name" "${UPDATED_PIPELINE_CONFIG_FILE}")"
-  CLUSTER_ZONE="$(yq -r ".gcp.gkeClusters[${i}].zone" "${UPDATED_PIPELINE_CONFIG_FILE}")"
-  CLUSTER_PROJECT="$(yq -r ".gcp.gkeClusters[${i}].project" "${UPDATED_PIPELINE_CONFIG_FILE}")"
-  echo "Fetching GKE kubeconfig for runtime cluster ${CLUSTER_NAME} (${CLUSTER_PROJECT}/${CLUSTER_ZONE})..."
-  KUBECONFIG="/tmp/${CLUSTER_NAME}-kubeconfig" gcloud container clusters get-credentials "${CLUSTER_NAME}" \
-    --location="${CLUSTER_ZONE}" \
-    --project="${CLUSTER_PROJECT}"
-done
+# Authenticate to any configured GKE Virtual Garden runtime clusters only when VIRTUAL_GARDEN_PROVIDER=gke
+if [[ "${VIRTUAL_GARDEN_PROVIDER}" == "gke" ]]; then
+  GKE_COUNT="$(yq '(.gcp.gkeClusters // []) | length' "${UPDATED_PIPELINE_CONFIG_FILE}")"
+  for ((i = 0; i < GKE_COUNT; i++)); do
+    CLUSTER_NAME="$(yq -r ".gcp.gkeClusters[${i}].name" "${UPDATED_PIPELINE_CONFIG_FILE}")"
+    CLUSTER_ZONE="$(yq -r ".gcp.gkeClusters[${i}].zone" "${UPDATED_PIPELINE_CONFIG_FILE}")"
+    CLUSTER_PROJECT="$(yq -r ".gcp.gkeClusters[${i}].project" "${UPDATED_PIPELINE_CONFIG_FILE}")"
+    echo "Fetching GKE kubeconfig for runtime cluster ${CLUSTER_NAME} (${CLUSTER_PROJECT}/${CLUSTER_ZONE})..."
+    KUBECONFIG="/tmp/${CLUSTER_NAME}-kubeconfig" gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+      --location="${CLUSTER_ZONE}" \
+      --project="${CLUSTER_PROJECT}"
+  done
+fi
 
 # Display current cluster pool status via gardener-release-cli
 make -C "${REPO_ROOT}" build-local

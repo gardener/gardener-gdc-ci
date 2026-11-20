@@ -212,3 +212,155 @@ func TestNewTestingClientRestoresSSLCertFile(t *testing.T) {
 		t.Errorf("SSL_CERT_FILE after Cleanup() = %q, want %q", got, prevVal)
 	}
 }
+
+func TestGdcloudLocation(t *testing.T) {
+	sdkRoot := t.TempDir()
+	sdkBinary := filepath.Join(sdkRoot, "bin", "gdcloud")
+	if err := os.MkdirAll(filepath.Dir(sdkBinary), 0755); err != nil {
+		t.Fatalf("Failed to create SDK bin directory: %v", err)
+	}
+	if err := os.WriteFile(sdkBinary, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("Failed to create SDK binary: %v", err)
+	}
+	emptyDir := t.TempDir()
+
+	tests := []struct {
+		name        string
+		gdcloudPath string
+		want        string
+	}{
+		{
+			name:        "unset falls back to PATH lookup",
+			gdcloudPath: "",
+			want:        "gdcloud",
+		},
+		{
+			name:        "binary path is used as is",
+			gdcloudPath: sdkBinary,
+			want:        sdkBinary,
+		},
+		{
+			name:        "nonexistent path is used as is",
+			gdcloudPath: filepath.Join(emptyDir, "missing", "gdcloud"),
+			want:        filepath.Join(emptyDir, "missing", "gdcloud"),
+		},
+		{
+			name:        "SDK root directory resolves to its binary",
+			gdcloudPath: sdkRoot,
+			want:        sdkBinary,
+		},
+		{
+			name:        "directory without the binary still points at the expected binary",
+			gdcloudPath: emptyDir,
+			want:        filepath.Join(emptyDir, "bin", "gdcloud"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GDCLOUD_PATH", tt.gdcloudPath)
+			if got := gdcloudLocation(); got != tt.want {
+				t.Errorf("gdcloudLocation() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExec_DirectoryWithoutBinaryNamesMissingBinary(t *testing.T) {
+	emptyDir := t.TempDir()
+	t.Setenv("GDCLOUD_PATH", emptyDir)
+
+	c := &TestingClient{configDir: t.TempDir()}
+	_, err := c.Exec("version")
+	if err == nil {
+		t.Fatal("Exec() succeeded, want an error for a directory without bin/gdcloud")
+	}
+	wantBinary := filepath.Join(emptyDir, "bin", "gdcloud")
+	if !strings.Contains(err.Error(), "cannot locate gdcloud binary") || !strings.Contains(err.Error(), wantBinary) {
+		t.Errorf("Exec() error = %q, want it to name the missing binary %q", err, wantBinary)
+	}
+}
+
+func TestNewTestingClientFromLocalSession(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if err := os.Unsetenv("XDG_CONFIG_HOME"); err != nil {
+		t.Fatalf("failed to unset XDG_CONFIG_HOME: %v", err)
+	}
+	t.Setenv("GDCLOUD_PLUGINS_BASE_DIR", "")
+	if err := os.Unsetenv("GDCLOUD_PLUGINS_BASE_DIR"); err != nil {
+		t.Fatalf("failed to unset GDCLOUD_PLUGINS_BASE_DIR: %v", err)
+	}
+
+	fakeHome := t.TempDir()
+	origHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return fakeHome, nil }
+	defer func() { userHomeDir = origHomeDir }()
+
+	caFile := filepath.Join(t.TempDir(), "gdc-ca.pem")
+	if err := os.WriteFile(caFile, []byte("-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n"), 0600); err != nil {
+		t.Fatalf("failed to write fake CA file: %v", err)
+	}
+
+	// 1. Missing ~/.config/gdcloud returns an actionable error.
+	if _, err := NewTestingClientFromLocalSession(caFile, "https://console.example.com"); err == nil || !strings.Contains(err.Error(), "no local gdcloud session found") {
+		t.Fatalf("expected missing local gdcloud session error, got %v", err)
+	}
+
+	// 2. Populated ~/.config/gdcloud and ~/.ais are cloned into the hermetic configDir without calling activate-service-account.
+	srcGDCloudDir := filepath.Join(fakeHome, ".config", "gdcloud")
+	srcAISDir := filepath.Join(fakeHome, ".ais", "gdcloud")
+	if err := os.MkdirAll(srcGDCloudDir, 0700); err != nil {
+		t.Fatalf("failed to create fake gdcloud dir: %v", err)
+	}
+	if err := os.MkdirAll(srcAISDir, 0700); err != nil {
+		t.Fatalf("failed to create fake ais dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcGDCloudDir, "active_config"), []byte("default"), 0600); err != nil {
+		t.Fatalf("failed to write active_config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcAISDir, "login_token_store.json"), []byte(`{"token":"test"}`), 0600); err != nil {
+		t.Fatalf("failed to write login_token_store.json: %v", err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "gdcloud-local-calls.log")
+	mockScript := filepath.Join(t.TempDir(), "mock-gdcloud.sh")
+	scriptContent := "#!/bin/sh\necho \"ARGS=$*\" >> \"" + logFile + "\"\n"
+	if err := os.WriteFile(mockScript, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("failed to write mock gdcloud script: %v", err)
+	}
+
+	origLoc := gdcloudLocation
+	gdcloudLocation = func() string { return mockScript }
+	defer func() { gdcloudLocation = origLoc }()
+
+	client, err := NewTestingClientFromLocalSession(caFile, "https://console.example.com")
+	if err != nil {
+		t.Fatalf("NewTestingClientFromLocalSession() unexpected error: %v", err)
+	}
+	defer client.Cleanup()
+
+	if _, err := os.Stat(filepath.Join(client.ConfigDir(), "gdcloud", "active_config")); err != nil {
+		t.Errorf("expected cloned gdcloud/active_config in %q: %v", client.ConfigDir(), err)
+	}
+	if _, err := os.Stat(filepath.Join(client.ConfigDir(), ".ais", "gdcloud", "login_token_store.json")); err != nil {
+		t.Errorf("expected cloned .ais/gdcloud/login_token_store.json in %q: %v", client.ConfigDir(), err)
+	}
+
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("failed to read gdcloud calls log: %v", err)
+	}
+	gotLog := string(logBytes)
+	if strings.Contains(gotLog, "activate-service-account") {
+		t.Errorf("NewTestingClientFromLocalSession() must not call activate-service-account, got log:\n%s", gotLog)
+	}
+	for _, want := range []string{
+		"ARGS=config set core/disable_prompts true",
+		"ARGS=config set auth/login_config_cert_path " + caFile,
+		"ARGS=config set core/organization_console_url https://console.example.com",
+	} {
+		if !strings.Contains(gotLog, want) {
+			t.Errorf("NewTestingClientFromLocalSession() missing expected call %q in log:\n%s", want, gotLog)
+		}
+	}
+}

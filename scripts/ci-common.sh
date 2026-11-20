@@ -169,8 +169,37 @@ setup_gdc_credentials() {
   fi
 }
 
+# gdcloud_can_install_plugins reports whether the gdcloud binary at $1 can install plugins into its
+# default plugins directory without elevated permissions. It mirrors hasWritableDefaultPluginsDir
+# in integration/pkg/gdcloud: symlinks are resolved first, the SDK root is only derived from a
+# bin/ directory, and nothing is created.
+gdcloud_can_install_plugins() {
+  local gdcloud_bin
+  gdcloud_bin="$(readlink -f "$1")" || return 1
+  local bin_dir
+  bin_dir="$(dirname "${gdcloud_bin}")"
+
+  if [[ -d "${bin_dir}/plugins" ]]; then
+    [[ -w "${bin_dir}/plugins" ]]
+    return
+  fi
+  if [[ "$(basename "${bin_dir}")" != "bin" ]]; then
+    return 1
+  fi
+
+  local sdk_root
+  sdk_root="$(dirname "${bin_dir}")"
+  if [[ -d "${sdk_root}/plugins" ]]; then
+    [[ -w "${sdk_root}/plugins" ]]
+    return
+  fi
+  [[ -w "${sdk_root}" ]]
+}
+
 # install_gdcloud_cli downloads and installs the gdcloud CLI and
 # gdcloud-k8s-auth-plugin from the GDC management API server's CLIBundleMetadata.
+# A gdcloud that is already on PATH (for example on a developer machine) is reused when it
+# matches the requested version and can install plugins without elevated permissions.
 install_gdcloud_cli() {
   local sa_file="$1"
   local ca_file="$2"
@@ -181,6 +210,20 @@ install_gdcloud_cli() {
   local sudo_cmd=""
   if [[ "${EUID:-$(id -u)}" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
     sudo_cmd="sudo"
+  fi
+
+  if command -v gdcloud >/dev/null 2>&1 && command -v gdcloud-k8s-auth-plugin >/dev/null 2>&1; then
+    local existing_bin
+    existing_bin="$(readlink -f "$(command -v gdcloud)")"
+    if gdcloud_can_install_plugins "${existing_bin}" \
+      && { [[ -z "${gdcloud_version}" ]] || "${existing_bin}" version 2>/dev/null | grep -qF "${gdcloud_version}"; }; then
+      echo "Using existing gdcloud CLI at ${existing_bin}"
+      export GDCLOUD_PATH="${existing_bin}"
+      if [[ -n "${GITHUB_ENV:-}" ]]; then
+        echo "GDCLOUD_PATH=${GDCLOUD_PATH}" >> "${GITHUB_ENV}"
+      fi
+      return 0
+    fi
   fi
 
   local gdcloud_root="/usr/local/bin/google-distributed-cloud-hosted-cli"

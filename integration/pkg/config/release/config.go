@@ -32,12 +32,23 @@ import (
 	"github.com/gardener/gardener-gdc-ci/integration/pkg/gdcloud"
 )
 
+const (
+	// VirtualGardenProviderGDC hosts the Virtual Garden on a GDC user cluster from gdc.virtualGardenClusters.
+	VirtualGardenProviderGDC = "gdc"
+	// VirtualGardenProviderGKE hosts the Virtual Garden on a GKE cluster from gcp.gkeClusters.
+	VirtualGardenProviderGKE = "gke"
+	// DefaultVirtualGardenProvider is used when no Virtual Garden provider is configured.
+	DefaultVirtualGardenProvider = VirtualGardenProviderGDC
+)
+
 // LoadOptions contains configuration options for loading the release test config.
 type LoadOptions struct {
-	AllocateNewClusters   bool
-	VirtualGardenProvider string
-	OnlyGarden            bool
-	AllowMissingGarden    bool
+	AllocateNewClusters         bool
+	VirtualGardenProvider       string
+	OnlyGarden                  bool
+	AllowMissingGarden          bool
+	LocalGDCloudSessionFallback bool
+	SkipImagePullCredentials    bool
 }
 
 // Option is a function that configures LoadOptions.
@@ -50,7 +61,8 @@ func WithClusterAllocation() Option {
 	}
 }
 
-// WithVirtualGardenProvider returns an Option that configures the Virtual Garden provider.
+// WithVirtualGardenProvider returns an Option that configures the Virtual Garden provider
+// (VirtualGardenProviderGDC or VirtualGardenProviderGKE). An empty value selects DefaultVirtualGardenProvider.
 func WithVirtualGardenProvider(provider string) Option {
 	return func(o *LoadOptions) {
 		o.VirtualGardenProvider = provider
@@ -68,6 +80,22 @@ func WithOnlyGarden() Option {
 func WithAllowMissingGarden() Option {
 	return func(o *LoadOptions) {
 		o.AllowMissingGarden = true
+	}
+}
+
+// WithLocalGDCloudSessionFallback returns an Option that allows initializing gdcloud from the
+// developer's local gdcloud CLI session (~/.config/gdcloud) when service account credentials are not set.
+func WithLocalGDCloudSessionFallback() Option {
+	return func(o *LoadOptions) {
+		o.LocalGDCloudSessionFallback = true
+	}
+}
+
+// WithSkipImagePullCredentials returns an Option that skips loading Harbor imagePullSecret credentials
+// for suites (such as teardown) that do not deploy workloads.
+func WithSkipImagePullCredentials() Option {
+	return func(o *LoadOptions) {
+		o.SkipImagePullCredentials = true
 	}
 }
 
@@ -89,11 +117,24 @@ func LoadReleaseTestConfig(releaseConfigurationFilePath, gardenerArtifactsVersio
 		o(options)
 	}
 
+	provider, err := resolveVirtualGardenProvider(options.VirtualGardenProvider)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx := context.WithValue(context.Background(), optionsKey{}, options)
 
 	pipelineCfg, err := loadPipelineConfig(releaseConfigurationFilePath)
 	if err != nil {
 		return nil, err
+	}
+
+	var gdcVirtualGardenClusters []config.RuntimeClusterConfig
+	if provider == VirtualGardenProviderGDC {
+		gdcVirtualGardenClusters, err = gdcVirtualGardenHostPool(&pipelineCfg.GDC)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	gdcClient, err := prepareGDC(ctx, pipelineCfg)
@@ -108,8 +149,8 @@ func LoadReleaseTestConfig(releaseConfigurationFilePath, gardenerArtifactsVersio
 		gardenCandidate       *operatorv1alpha1.Garden
 		gardenNeedsAnnotation bool
 	)
-	if options.VirtualGardenProvider == "gdc" {
-		virtualGardenConfig, runtimeClient, runtimeClusterName, gardenCandidate, gardenNeedsAnnotation, err = findGardenClusterFromGDCUserClustersPool(ctx, pipelineCfg.GDC.UserClusters, gardenerArtifactsVersion, gdcClient)
+	if provider == VirtualGardenProviderGDC {
+		virtualGardenConfig, runtimeClient, runtimeClusterName, gardenCandidate, gardenNeedsAnnotation, err = findGardenClusterFromGDCUserClustersPool(ctx, gdcVirtualGardenClusters, gardenerArtifactsVersion, gdcClient)
 	} else {
 		virtualGardenConfig, runtimeClient, runtimeClusterName, gardenCandidate, gardenNeedsAnnotation, err = findGardenClusterFromGKEClustersPool(ctx, pipelineCfg.GCP.GKEClusters, gardenerArtifactsVersion)
 	}
@@ -119,7 +160,7 @@ func LoadReleaseTestConfig(releaseConfigurationFilePath, gardenerArtifactsVersio
 
 	var seedConfig *config.SeedConfig
 	if !options.OnlyGarden {
-		if pipelineCfg.GDC.UseUserClusterAsSeed && options.VirtualGardenProvider == "gdc" {
+		if pipelineCfg.GDC.UseUserClusterAsSeed && provider == VirtualGardenProviderGDC {
 			podCIDR, svcCIDR := ResolveClusterCIDRs(ctx, runtimeClient)
 			seedConfig = &config.SeedConfig{
 				Name: "seed-" + GetCommitHashOrSanitize(gardenerArtifactsVersion),
@@ -168,9 +209,12 @@ func LoadReleaseTestConfig(releaseConfigurationFilePath, gardenerArtifactsVersio
 		managementClients[zone] = c
 	}
 
-	pullCredentials, err := config.AccessLatestSecret(ctx, "harbor-docker-config")
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch harbor docker config secret: %w", err)
+	var pullCredentials []byte
+	if !options.SkipImagePullCredentials {
+		pullCredentials, err = config.AccessLatestSecret(ctx, "harbor-docker-config")
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch harbor docker config secret: %w", err)
+		}
 	}
 
 	releaseTestConfig := &config.ReleaseTestConfig{
@@ -192,6 +236,32 @@ func LoadReleaseTestConfig(releaseConfigurationFilePath, gardenerArtifactsVersio
 	}
 
 	return releaseTestConfig, nil
+}
+
+// resolveVirtualGardenProvider validates the requested Virtual Garden provider and applies the default.
+// Unknown values are rejected instead of silently selecting a provider.
+func resolveVirtualGardenProvider(provider string) (string, error) {
+	switch provider {
+	case "":
+		return DefaultVirtualGardenProvider, nil
+	case VirtualGardenProviderGDC, VirtualGardenProviderGKE:
+		return provider, nil
+	default:
+		return "", fmt.Errorf("unsupported virtual garden provider %q (supported: %q, %q)", provider, VirtualGardenProviderGDC, VirtualGardenProviderGKE)
+	}
+}
+
+// gdcVirtualGardenHostPool returns the GDC user clusters that may host the Virtual Garden.
+// The Soil pool (gdc.userClusters) is only shared when gdc.useUserClusterAsSeed is set. Otherwise a missing or
+// misspelled gdc.virtualGardenClusters is a configuration error and must not claim a permanent Soil Garden.
+func gdcVirtualGardenHostPool(gdcCfg *config.GDCConfig) ([]config.RuntimeClusterConfig, error) {
+	if len(gdcCfg.VirtualGardenClusters) > 0 {
+		return gdcCfg.VirtualGardenClusters, nil
+	}
+	if gdcCfg.UseUserClusterAsSeed {
+		return gdcCfg.UserClusters, nil
+	}
+	return nil, fmt.Errorf("gdc.virtualGardenClusters must be configured when the Virtual Garden is hosted on GDC")
 }
 
 // loadPipelineConfig reads a YAML file from the given path and unmarshals it

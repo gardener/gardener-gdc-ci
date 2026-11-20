@@ -342,3 +342,28 @@ var GetGDCClient = func(ctx context.Context, caData, consoleURL string) (*gdclou
 
 	return client, nil
 }
+
+// GetGDCClientWithLocalFallback initializes the gdcloud TestingClient from service account
+// credentials (GDC_RELEASE_SERVICE_ACCOUNT_KEY / GDC_SERVICE_ACCOUNT_FILE) when provided, and
+// otherwise falls back to cloning the developer's active local gdcloud CLI session (~/.config/gdcloud).
+var GetGDCClientWithLocalFallback = func(ctx context.Context, caData, consoleURL string) (*gdcloud.TestingClient, error) {
+	if _, err := AccessLatestSecret(ctx, "gdc-service-account"); err == nil {
+		return GetGDCClient(ctx, caData, consoleURL)
+	}
+
+	caDataBytes, err := base64.StdEncoding.DecodeString(caData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode CA data: %w", err)
+	}
+	caDataPath, err := WriteToFile("cadata-*.pem", caDataBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write CA data to file: %w", err)
+	}
+
+	client, err := gdcloud.NewTestingClientFromLocalSession(caDataPath, consoleURL)
+	if err != nil {
+		_ = os.Remove(caDataPath)
+		return nil, fmt.Errorf("unable to initialize gdcloud client from local session: %w", err)
+	}
+	return client, nil
+}

@@ -18,6 +18,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -38,13 +39,18 @@ import (
 )
 
 const (
-	// Upload destination GCS bucket Name
-	gcsBucketName = "gardener-ci-pipeline"
 	// Directory within the bucket to store results
 	gcsResultsDir = "shoot-conformance-results"
 	// fixed path for junit output of sonobuoy test result
 	e2eResultsPath = "plugins/e2e/results/global/junit_01.xml"
+	// artifactsDirEnv names the local directory whose diagnostics/conformance subdirectory receives the results tarball.
+	artifactsDirEnv = "RELEASE_ARTIFACTS_DIR"
+	// diagnosticsBucketEnv names an optional private GCS bucket that additionally receives the results tarball.
+	diagnosticsBucketEnv = "DIAGNOSTICS_GCS_BUCKET"
 )
+
+// uploadFile allows overriding the GCS upload function for hermetic unit testing.
+var uploadFile = gcs.UploadFile
 
 type junitTestSuites struct {
 	XMLName  xml.Name       `xml:"testsuites"`
@@ -83,6 +89,7 @@ var (
 	gardenerArtifactsVersion        = flag.String("gardener-artifacts-version", "", "The version string for Gardener artifacts")
 	releaseConfigurationFilePath    = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
 	continuousConfigurationFilePath = flag.String("continuous-configuration-file-path", "", "the path to the continuous configuration file")
+	virtualGardenProvider           = flag.String("virtual-garden-provider", "gdc", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 )
 
 // sanitizePathSegment replaces characters unsuitable for GCS paths with hyphens.
@@ -95,9 +102,10 @@ func TestShootConformance(t *testing.T) {
 	t.Logf("TestShootConformance started.")
 
 	releasePipelineCfg, err := loader.LoadConfig(loader.LoadConfigOptions{
-		ReleaseConfigPath:    *releaseConfigurationFilePath,
-		ContinuousConfigPath: *continuousConfigurationFilePath,
-		GardenerVersion:      *gardenerArtifactsVersion,
+		ReleaseConfigPath:     *releaseConfigurationFilePath,
+		ContinuousConfigPath:  *continuousConfigurationFilePath,
+		GardenerVersion:       *gardenerArtifactsVersion,
+		VirtualGardenProvider: *virtualGardenProvider,
 	})
 	if err != nil {
 		t.Fatalf("failed to load configuration: %v", err)
@@ -216,14 +224,11 @@ func TestShootConformance(t *testing.T) {
 		timestamp := time.Now().UTC().Format("20060102T150405Z")
 		destFileName := fmt.Sprintf("conf-%s-%s.tar.gz", timestamp, releasePipelineCfg.TestShoot.Name)
 
-		// Construct the GCS object path
-		gcsDestObjectPath := filepath.Join(gcsResultsDir, destFileName)
-
-		// Upload the results file to GCS
-		t.Logf("Uploading results to GCS bucket %s", gcsBucketName)
-		uploadFileToGCS(t, gcsBucketName, gcsDestObjectPath, originalResultsPath, testRunId, releasePipelineCfg.TestShoot.Name)
-
-		t.Logf("Conformance test results tarball uploaded to: gs://%s/%s", gcsBucketName, gcsDestObjectPath)
+		// The results tarball is the certification evidence: a configured destination that cannot be
+		// written fails the test instead of letting the run finish without it.
+		if err := persistConformanceResults(ctx, t.Logf, originalResultsPath, destFileName, testRunId, releasePipelineCfg.TestShoot.Name); err != nil {
+			t.Errorf("Failed to persist conformance results tarball: %v", err)
+		}
 
 		t.Log("Verifying conformance test results")
 		if err := verifySonobuoyResults(t, originalResultsPath); err != nil {
@@ -317,25 +322,70 @@ func verifySonobuoyResults(t *testing.T, resultPath string) error {
 	return nil
 }
 
-// uploadFileToGCS uploads a local file to the specified GCS bucket and object path.
-func uploadFileToGCS(t *testing.T, bucketName, objectName, localFilePath, testRunId, shootName string) {
-	t.Helper()
-	ctx := context.Background()
+// persistConformanceResults stores the Sonobuoy results tarball in every configured destination:
+// ${RELEASE_ARTIFACTS_DIR}/diagnostics/conformance and the GCS bucket named by DIAGNOSTICS_GCS_BUCKET.
+// It returns an error for each configured destination that could not be written. With no destination
+// configured the tarball simply stays at resultsPath.
+func persistConformanceResults(ctx context.Context, logf func(format string, args ...any), resultsPath, destFileName, testRunId, shootName string) error {
+	artifactsDir := os.Getenv(artifactsDirEnv)
+	bucket := os.Getenv(diagnosticsBucketEnv)
+	if artifactsDir == "" && bucket == "" {
+		logf("Neither %s nor %s is set; the conformance results tarball stays at %s", artifactsDirEnv, diagnosticsBucketEnv, resultsPath)
+		return nil
+	}
+
+	var errs []error
+	if artifactsDir != "" {
+		localDest := filepath.Join(artifactsDir, "diagnostics", "conformance", destFileName)
+		if err := copyFile(resultsPath, localDest); err != nil {
+			errs = append(errs, fmt.Errorf("failed to save results to %s: %w", localDest, err))
+		} else {
+			logf("Saved conformance results tarball to %s", localDest)
+		}
+	}
+
+	if bucket == "" {
+		logf("%s is not set; skipping the GCS upload of the conformance results", diagnosticsBucketEnv)
+		return errors.Join(errs...)
+	}
 
 	options := gcs.UploadOptions{
-		BucketName:    bucketName,
-		ObjectName:    objectName,
-		LocalFilePath: localFilePath,
+		BucketName:    bucket,
+		ObjectName:    filepath.Join(gcsResultsDir, destFileName),
+		LocalFilePath: resultsPath,
 		Metadata: map[string]string{
 			"uploaded-by":       "TestShootConformance",
-			"original-filename": filepath.Base(localFilePath),
+			"original-filename": filepath.Base(resultsPath),
 			"test-run-id":       testRunId,
 			"shoot-name":        shootName,
 		},
 	}
-
-	if err := gcs.UploadFile(ctx, options); err != nil {
-		t.Fatalf("Failed to upload file to GCS: %v", err)
+	if err := uploadFile(ctx, options); err != nil {
+		errs = append(errs, fmt.Errorf("failed to upload results to gs://%s/%s: %w", options.BucketName, options.ObjectName, err))
+	} else {
+		logf("Uploaded conformance results to gs://%s/%s", options.BucketName, options.ObjectName)
 	}
-	t.Logf("Successfully uploaded to gs://%s/%s", bucketName, objectName)
+	return errors.Join(errs...)
+}
+
+// copyFile streams src into dst, creating the parent directory of dst if necessary.
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }

@@ -33,9 +33,10 @@ var (
 	releaseConfigurationFilePath = flag.String("release-configuration-file-path", "", "Path to the release configuration YAML file (required)")
 	snapshotConfigPath           = flag.String("snapshot-config-path", "", "Path to the snapshot resources YAML file (optional, defaults to capturing all resources)")
 	gardenerArtifactsVersion     = flag.String("gardener-artifacts-version", "", "Gardener artifacts version for loading release config (required)")
-	bucket                       = flag.String("bucket", "gardener-ci-pipeline", "GCS bucket for uploading snapshots")
-	destDir                      = flag.String("dest-dir", "", "GCS destination directory prefix (required)")
-	virtualGardenProvider        = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
+	bucket                       = flag.String("bucket", "", "Optional GCS bucket to upload the snapshot archive to (requires --dest-dir)")
+	destDir                      = flag.String("dest-dir", "", "Destination directory prefix inside the GCS bucket (required with --bucket)")
+	outputDir                    = flag.String("output-dir", "", "Optional local directory to store the snapshot archive in")
+	virtualGardenProvider        = flag.String("virtual-garden-provider", "gdc", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 )
 
 const (
@@ -51,9 +52,16 @@ var supportedClusters = []string{ClusterShoot, ClusterVirtualGarden, ClusterSeed
 func main() {
 	flag.Parse()
 
-	if *releaseConfigurationFilePath == "" || *gardenerArtifactsVersion == "" || *destDir == "" {
+	if *releaseConfigurationFilePath == "" || *gardenerArtifactsVersion == "" {
 		flag.Usage()
 		os.Exit(1)
+	}
+	// Fail before capturing anything if the snapshot would have nowhere to go.
+	if *outputDir == "" && *bucket == "" {
+		log.Fatal("At least one snapshot destination is required: set --output-dir and/or --bucket")
+	}
+	if *bucket != "" && *destDir == "" {
+		log.Fatal("--dest-dir is required with --bucket")
 	}
 
 	ctx := context.Background()
@@ -84,9 +92,12 @@ func main() {
 		log.Println("snapshot-config-path not specified, will automatically discover and snapshot all resources")
 	}
 
-	uploadConfig := snapshot.DestinationConfig{
-		Bucket:  *bucket,
-		DestDir: *destDir,
+	destinations := snapshot.ArchiveDestinations{
+		LocalDir: *outputDir,
+		Upload: &snapshot.DestinationConfig{
+			Bucket:  *bucket,
+			DestDir: *destDir,
+		},
 	}
 
 	combinedSnapshotsBuffer, err := os.MkdirTemp("", "snapshot-buffer-*")
@@ -204,9 +215,8 @@ func main() {
 		}
 	}
 
-	log.Println("Uploading combined snapshots archive to gs://gardener-ci-pipeline")
-	if err := snapshot.UploadArchive(ctx, combinedSnapshotsBuffer, &uploadConfig, "all-clusters"); err != nil {
-		log.Fatalf("Failed to upload snapshot archive: %v", err)
+	if err := snapshot.PersistArchive(ctx, combinedSnapshotsBuffer, "all-clusters", destinations); err != nil {
+		log.Fatalf("Failed to persist snapshot archive: %v", err)
 	}
 
 	log.Println("Snapshot completed successfully")

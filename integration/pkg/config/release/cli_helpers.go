@@ -33,7 +33,7 @@ import (
 type ActiveJobStatus struct {
 	GardenerArtifactsVersion string // The artifacts version associated with the release job.
 	VirtualGarden            string // The name of the Virtual Garden cluster.
-	RuntimeCluster           string // The GKE cluster hosting the Virtual Garden.
+	RuntimeCluster           string // The runtime cluster (GDC user cluster or GKE cluster) hosting the Virtual Garden.
 	CreatedSeed              string // The Seed cluster(s) created for this job.
 	SoilCluster              string // The Shoot cluster(s) in GDC acting as seed hosts (Soil).
 	CreatedShoot             string // All Shoot clusters deployed on the Virtual Garden.
@@ -42,7 +42,7 @@ type ActiveJobStatus struct {
 // AvailableClusterStatus represents a cluster that is idle and available for use.
 type AvailableClusterStatus struct {
 	Name     string // The name of the cluster.
-	Type     string // The type of the cluster (e.g., GKE Virtual Garden Host, Shoot Seed Host).
+	Type     string // The type of the cluster (e.g., GDC Virtual Garden Host, GKE Virtual Garden Host, Shoot Seed Host).
 	HostedBy string // Information about where the cluster is hosted.
 }
 
@@ -59,12 +59,21 @@ func LoadCLIConfig(ctx context.Context, releaseConfigurationFilePath string) (*C
 		return nil, err
 	}
 
-	gdcClient, err := prepareGDC(ctx, pipelineCfg)
+	ctxWithOpts := context.WithValue(ctx, optionsKey{}, &LoadOptions{LocalGDCloudSessionFallback: true})
+	gdcClient, err := prepareGDC(ctxWithOpts, pipelineCfg)
 	if err != nil {
 		return nil, err
 	}
 
 	return &CLIConfig{pipelineConfig: pipelineCfg, gdcClient: gdcClient}, nil
+}
+
+// Cleanup releases any temporary gdcloud configuration directory held by the CLI config.
+func (c *CLIConfig) Cleanup() error {
+	if c == nil || c.gdcClient == nil {
+		return nil
+	}
+	return c.gdcClient.Cleanup()
 }
 
 // GetStatus returns the status of both active release jobs, claimed clusters, and available clusters.
@@ -73,79 +82,115 @@ func (c *CLIConfig) GetStatus(ctx context.Context) ([]ActiveJobStatus, []Availab
 	var availableClusters []AvailableClusterStatus
 	jobsMap := make(map[string]*ActiveJobStatus)
 
-	// Check GKE clusters
-	gkeClients, err := getGKEClusterClients(c.pipelineConfig.GCP.GKEClusters)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get gke cluster clients: %w", err)
-	}
-
-	// Check the status of Virtual Garden on GKE clusters
-	for clusterName, client := range gkeClients {
-		gardenList := &operatorv1alpha1.GardenList{}
-		if err := client.List(ctx, gardenList); err != nil && !meta.IsNoMatchError(err) {
-			return nil, nil, fmt.Errorf("failed to list Garden resources in cluster %q: %w", clusterName, err)
-		}
-
-		for _, garden := range gardenList.Items {
-			gardenerArtifactsVersion := garden.GetAnnotations()[CommitHashAnnotation]
-			if gardenerArtifactsVersion == "" {
-				availableClusters = append(availableClusters, AvailableClusterStatus{
-					Name:     clusterName,
-					Type:     "GKE (Virtual Garden Host)",
-					HostedBy: c.getHostedBy(clusterName, true),
-				})
-				continue
-			}
-
-			job, ok := jobsMap[gardenerArtifactsVersion]
+	inspectVirtualGardenHosts := func(clusters []config.RuntimeClusterConfig, clients map[string]client.WithWatch, hostType string, isGKE bool) error {
+		for _, rc := range clusters {
+			clusterName := rc.Name
+			clusterClient, ok := clients[clusterName]
 			if !ok {
-				job = &ActiveJobStatus{GardenerArtifactsVersion: gardenerArtifactsVersion}
-				jobsMap[gardenerArtifactsVersion] = job
+				return fmt.Errorf("client not found for cluster %q", clusterName)
 			}
-			job.VirtualGarden = garden.Name
-			job.RuntimeCluster = c.getHostedBy(clusterName, true)
 
-			if virtualGardenConfig, err := config.GetGardenClient(ctx, client); err == nil {
-				populateCreatedSeedAndShootResources(ctx, virtualGardenConfig.Client, gardenerArtifactsVersion, job)
+			gardenList := &operatorv1alpha1.GardenList{}
+			if err := clusterClient.List(ctx, gardenList); err != nil && !meta.IsNoMatchError(err) {
+				return fmt.Errorf("failed to list Garden resources in cluster %q: %w", clusterName, err)
+			}
+
+			for _, garden := range gardenList.Items {
+				gardenerArtifactsVersion := garden.GetAnnotations()[CommitHashAnnotation]
+				if gardenerArtifactsVersion == "" {
+					availableClusters = append(availableClusters, AvailableClusterStatus{
+						Name:     clusterName,
+						Type:     hostType,
+						HostedBy: c.getHostedBy(clusterName, isGKE),
+					})
+					continue
+				}
+
+				job, exists := jobsMap[gardenerArtifactsVersion]
+				if !exists {
+					job = &ActiveJobStatus{GardenerArtifactsVersion: gardenerArtifactsVersion}
+					jobsMap[gardenerArtifactsVersion] = job
+				}
+				job.VirtualGarden = garden.Name
+				job.RuntimeCluster = c.getHostedBy(clusterName, isGKE)
+
+				if virtualGardenConfig, err := config.GetGardenClient(ctx, clusterClient); err == nil {
+					populateCreatedSeedAndShootResources(ctx, virtualGardenConfig.Client, gardenerArtifactsVersion, job)
+				}
 			}
 		}
+		return nil
 	}
 
-	// Check the status of Shoots clusters on GDC clusters
-	gdcClients, err := config.GetGDCUserClusterClients(c.pipelineConfig.GDC.UserClusters, c.gdcClient)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get user cluster clients: %w", err)
-	}
-
-	for userClusterName, client := range gdcClients {
-		virtualGardenConfig, err := config.GetGardenClient(ctx, client)
+	// Check GKE Virtual Garden host clusters when configured
+	if len(c.pipelineConfig.GCP.GKEClusters) > 0 {
+		gkeClients, err := getGKEClusterClients(c.pipelineConfig.GCP.GKEClusters)
 		if err != nil {
-			continue
+			return nil, nil, fmt.Errorf("failed to get gke cluster clients: %w", err)
+		}
+		if err := inspectVirtualGardenHosts(c.pipelineConfig.GCP.GKEClusters, gkeClients, "GKE (Virtual Garden Host)", true); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Check GDC Virtual Garden host clusters when configured
+	gdcVGClusters := c.pipelineConfig.GDC.VirtualGardenClusters
+	if len(gdcVGClusters) == 0 && c.pipelineConfig.GDC.UseUserClusterAsSeed {
+		gdcVGClusters = c.pipelineConfig.GDC.UserClusters
+	}
+	if len(gdcVGClusters) > 0 {
+		gdcVGClients, err := config.GetGDCUserClusterClients(gdcVGClusters, c.gdcClient)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get gdc virtual garden cluster clients: %w", err)
+		}
+		if err := inspectVirtualGardenHosts(gdcVGClusters, gdcVGClients, "GDC (Virtual Garden Host)", false); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Check the status of Shoot clusters (Soil Seed Hosts) on GDC user clusters
+	if len(c.pipelineConfig.GDC.UserClusters) > 0 && !c.pipelineConfig.GDC.UseUserClusterAsSeed {
+		gdcClients, err := config.GetGDCUserClusterClients(c.pipelineConfig.GDC.UserClusters, c.gdcClient)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get user cluster clients: %w", err)
 		}
 
-		shootList := &gardencorev1beta1.ShootList{}
-		if err := virtualGardenConfig.Client.List(ctx, shootList); err != nil {
-			continue
-		}
+		for _, uc := range c.pipelineConfig.GDC.UserClusters {
+			userClusterName := uc.Name
+			clusterClient, ok := gdcClients[userClusterName]
+			if !ok {
+				return nil, nil, fmt.Errorf("client not found for GDC user cluster %q", userClusterName)
+			}
 
-		hostedBy := c.getHostedBy(userClusterName, false)
-		for _, shoot := range shootList.Items {
-			gardenerArtifactsVersion := shoot.GetAnnotations()[CommitHashAnnotation]
-			if gardenerArtifactsVersion == "" {
-				availableClusters = append(availableClusters, AvailableClusterStatus{
-					Name:     shoot.Name,
-					Type:     "Shoot (Seed Host)",
-					HostedBy: fmt.Sprintf("%s\n(on %s)", userClusterName, hostedBy),
-				})
+			virtualGardenConfig, err := config.GetGardenClient(ctx, clusterClient)
+			if err != nil {
 				continue
 			}
 
-			if job, ok := jobsMap[gardenerArtifactsVersion]; ok {
-				hostInfo := fmt.Sprintf("%s [ %s ]\n(on %s)", shoot.Name, getShootStatus(&shoot), hostedBy)
-				if job.SoilCluster == "" {
-					job.SoilCluster = hostInfo
-				} else {
-					job.SoilCluster += "\n" + hostInfo
+			shootList := &gardencorev1beta1.ShootList{}
+			if err := virtualGardenConfig.Client.List(ctx, shootList); err != nil {
+				continue
+			}
+
+			hostedBy := c.getHostedBy(userClusterName, false)
+			for _, shoot := range shootList.Items {
+				gardenerArtifactsVersion := shoot.GetAnnotations()[CommitHashAnnotation]
+				if gardenerArtifactsVersion == "" {
+					availableClusters = append(availableClusters, AvailableClusterStatus{
+						Name:     shoot.Name,
+						Type:     "Shoot (Seed Host)",
+						HostedBy: fmt.Sprintf("%s\n(on %s)", userClusterName, hostedBy),
+					})
+					continue
+				}
+
+				if job, ok := jobsMap[gardenerArtifactsVersion]; ok {
+					hostInfo := fmt.Sprintf("%s [ %s ]\n(on %s)", shoot.Name, getShootStatus(&shoot), hostedBy)
+					if job.SoilCluster == "" {
+						job.SoilCluster = hostInfo
+					} else {
+						job.SoilCluster += "\n" + hostInfo
+					}
 				}
 			}
 		}
@@ -166,6 +211,11 @@ func (c *CLIConfig) getHostedBy(clusterName string, isGKE bool) string {
 			}
 		}
 	} else { // GDC
+		for _, cfg := range c.pipelineConfig.GDC.VirtualGardenClusters {
+			if cfg.Name == clusterName {
+				return fmt.Sprintf("GDC: %s\n%s\n%s", cfg.Name, cfg.Project, cfg.Zone)
+			}
+		}
 		for _, cfg := range c.pipelineConfig.GDC.UserClusters {
 			if cfg.Name == clusterName {
 				return fmt.Sprintf("GDC: %s\n%s\n%s", cfg.Name, cfg.Project, cfg.Zone)

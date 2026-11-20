@@ -41,6 +41,7 @@ var (
 	mcmArtifactsVersion          string
 	ccmArtifactsVersion          string
 	releaseConfigurationFilePath = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
+	virtualGardenProvider        = flag.String("virtual-garden-provider", "gdc", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 )
 
 // init registers the command-line flags.
@@ -56,7 +57,12 @@ func TestCreateGardenCluster(t *testing.T) {
 	ctx := context.Background()
 
 	t.Logf("Loading release configuration from %s", *releaseConfigurationFilePath)
-	releaseConfigData, err := releaseConfig.LoadReleaseTestConfig(*releaseConfigurationFilePath, gardenerArtifactsVersion, releaseConfig.WithClusterAllocation())
+	releaseConfigData, err := releaseConfig.LoadReleaseTestConfig(
+		*releaseConfigurationFilePath,
+		gardenerArtifactsVersion,
+		releaseConfig.WithClusterAllocation(),
+		releaseConfig.WithVirtualGardenProvider(*virtualGardenProvider),
+	)
 	if err != nil {
 		t.Fatalf("failed to load release configuration: %v", err)
 	}

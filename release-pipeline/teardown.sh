@@ -6,21 +6,28 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_CONFIG="${REPO_ROOT}/pipeline-configurations/staging-release-pipeline-configuration.yaml"
 
 usage() {
-  echo "Usage: $0 --gardener-artifacts-version=<version> --config=<path>"
-  exit 1
+  echo "Usage: $0 --gardener-artifacts-version=<version> [--config=<path>] [--virtual-garden-provider=<gdc|gke>] [--num-shoots=<n>]"
 }
 
 GARDENER_ARTIFACTS_VERSION=""
-CONFIG=""
+CONFIG="$DEFAULT_CONFIG"
+VIRTUAL_GARDEN_PROVIDER="${VIRTUAL_GARDEN_PROVIDER:-gdc}"
+NUM_SHOOTS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
     --gardener-artifacts-version)
       if [[ $# -lt 2 ]]; then
-        echo "Error: --gardener-artifacts-version requires a value"
-        usage
+        echo "Error: --gardener-artifacts-version requires a value" >&2
+        usage >&2
+        exit 1
       fi
       GARDENER_ARTIFACTS_VERSION="$2"
       shift 2
@@ -31,8 +38,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --config)
       if [[ $# -lt 2 ]]; then
-        echo "Error: --config requires a value"
-        usage
+        echo "Error: --config requires a value" >&2
+        usage >&2
+        exit 1
       fi
       CONFIG="$2"
       shift 2
@@ -41,22 +49,60 @@ while [[ $# -gt 0 ]]; do
       CONFIG="${1#*=}"
       shift
       ;;
+    --virtual-garden-provider)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --virtual-garden-provider requires a value" >&2
+        usage >&2
+        exit 1
+      fi
+      VIRTUAL_GARDEN_PROVIDER="$2"
+      shift 2
+      ;;
+    --virtual-garden-provider=*)
+      VIRTUAL_GARDEN_PROVIDER="${1#*=}"
+      shift
+      ;;
+    --num-shoots)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --num-shoots requires a value" >&2
+        usage >&2
+        exit 1
+      fi
+      NUM_SHOOTS="$2"
+      shift 2
+      ;;
+    --num-shoots=*)
+      NUM_SHOOTS="${1#*=}"
+      shift
+      ;;
     *)
-      echo "Unknown argument: $1"
-      usage
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
       ;;
   esac
 done
 
 if [[ -z "$GARDENER_ARTIFACTS_VERSION" ]]; then
-  echo "Error: --gardener-artifacts-version is required"
-  usage
+  echo "Error: --gardener-artifacts-version is required" >&2
+  usage >&2
+  exit 1
 fi
 
-if [[ -z "$CONFIG" ]]; then
-  echo "Error: --config is required"
-  usage
+if [[ -z "$CONFIG" || ! -f "$CONFIG" ]]; then
+  echo "Error: configuration file not found: $CONFIG" >&2
+  usage >&2
+  exit 1
 fi
+
+case "$VIRTUAL_GARDEN_PROVIDER" in
+  gdc|gke)
+    ;;
+  *)
+    echo "Error: unsupported --virtual-garden-provider '${VIRTUAL_GARDEN_PROVIDER}' (supported: 'gdc', 'gke')" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -z "${HOME:-}" ]]; then
   HOME=$(pwd)
@@ -72,20 +118,20 @@ if ! command -v gdcloud >/dev/null 2>&1; then
   done
 fi
 
-if [[ -z "${GDC_RELEASE_SERVICE_ACCOUNT_KEY:-}" && -z "${GDC_SERVICE_ACCOUNT_FILE:-}" ]]; then
-  GDC_RELEASE_SERVICE_ACCOUNT_KEY="$(gcloud secrets versions access latest --project="${GDC_GCP_PROJECT_ID:-gardener-ci}" --secret=staging-gdc-service-account-keys)"
-  export GDC_RELEASE_SERVICE_ACCOUNT_KEY
-fi
-
-if [[ -z "${GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON:-}" && -z "${HARBOR_DOCKER_CONFIG_FILE:-}" ]]; then
-  GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON="$(gcloud secrets versions access latest --project="${GDC_GCP_PROJECT_ID:-gardener-ci}" --secret=staging-harbor-docker-config-credentials)"
-  export GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON
-fi
-
 echo "Triggering teardown test..."
 echo "Version: $GARDENER_ARTIFACTS_VERSION"
 echo "Config: $CONFIG"
+echo "Virtual Garden Provider: $VIRTUAL_GARDEN_PROVIDER"
+
+TEST_ARGS=(
+  --gardener-artifacts-version="$GARDENER_ARTIFACTS_VERSION"
+  --release-configuration-file-path="$CONFIG"
+  --virtual-garden-provider="$VIRTUAL_GARDEN_PROVIDER"
+)
+if [[ -n "$NUM_SHOOTS" ]]; then
+  TEST_ARGS+=(--num-shoots="$NUM_SHOOTS")
+fi
 
 go test -v -timeout=65m "${REPO_ROOT}/integration/release/teardown" \
-  --gardener-artifacts-version="$GARDENER_ARTIFACTS_VERSION" \
-  --release-configuration-file-path="$CONFIG"
+  -args \
+  "${TEST_ARGS[@]}"

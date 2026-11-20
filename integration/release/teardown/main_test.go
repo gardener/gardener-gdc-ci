@@ -46,7 +46,7 @@ import (
 var (
 	gardenerArtifactsVersion     = flag.String("gardener-artifacts-version", "", "The version string for Gardener artifacts")
 	releaseConfigurationFilePath = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
-	virtualGardenProvider        = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
+	virtualGardenProvider        = flag.String("virtual-garden-provider", "gdc", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 	numShoots                    = flag.Int("num-shoots", 1, "The number of Shoot clusters to delete")
 )
 
@@ -69,6 +69,8 @@ func TestCleanupResources(t *testing.T) {
 		*releaseConfigurationFilePath,
 		*gardenerArtifactsVersion,
 		releaseConfig.WithVirtualGardenProvider(*virtualGardenProvider),
+		releaseConfig.WithLocalGDCloudSessionFallback(),
+		releaseConfig.WithSkipImagePullCredentials(),
 	)
 	if err != nil {
 		t.Fatalf("failed to load release configuration: %v", err)

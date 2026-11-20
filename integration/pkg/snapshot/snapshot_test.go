@@ -33,6 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/gardener/gardener-gdc-ci/integration/pkg/gcs"
 )
 
 func TestCaptureSnapshot_Namespace(t *testing.T) {
@@ -314,5 +316,311 @@ func TestCaptureSnapshot_PartialSnapshotError(t *testing.T) {
 	expectedErrStr := "failed to list resource pods in default: simulated list permission error"
 	if !strings.Contains(partialErr.Error(), expectedErrStr) {
 		t.Errorf("Expected error message to contain %q, got %q", expectedErrStr, partialErr.Error())
+	}
+}
+
+func TestCaptureSnapshot_NeverCapturesSecrets(t *testing.T) {
+	// Readable placeholder stored in the Secret; it must never show up in a snapshot file.
+	const unwantedContent = "do-not-capture"
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	namespace := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Namespace",
+			"metadata":   map[string]interface{}{"name": "garden"},
+		},
+	}
+	secret := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata":   map[string]interface{}{"name": "virtual-garden-kubeconfig", "namespace": "garden"},
+			"stringData": map[string]interface{}{"kubeconfig": unwantedContent},
+		},
+	}
+	configMap := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "settings", "namespace": "garden"},
+		},
+	}
+
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+	mapper.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
+	mapper.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Secret"}, meta.RESTScopeNamespace)
+	mapper.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
+
+	tests := []struct {
+		name   string
+		config *ClusterSnapshotConfig
+	}{
+		{
+			name:   "auto-discovery",
+			config: nil,
+		},
+		{
+			name: "explicit Secret target",
+			config: &ClusterSnapshotConfig{
+				ClusterName: "runtime-cluster",
+				Targets: []NamespaceTarget{
+					{
+						Namespace: "garden",
+						Resources: []ResourceTarget{
+							{APIVersion: "v1", Kind: "Secret"},
+							{APIVersion: "v1", Kind: "ConfigMap"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			crClient := fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).
+				WithObjects(namespace.DeepCopy(), secret.DeepCopy(), configMap.DeepCopy()).Build()
+
+			dir := filepath.Join(t.TempDir(), "runtime-cluster")
+			if err := CaptureSnapshotToDir(context.Background(), SnapshotClients{CRClient: crClient}, dir, CaptureOptions{Config: tc.config}); err != nil {
+				t.Fatalf("CaptureSnapshotToDir failed: %v", err)
+			}
+
+			if _, err := os.Stat(filepath.Join(dir, "garden", "configmaps", "settings.yaml")); err != nil {
+				t.Errorf("Expected the ConfigMap to be captured: %v", err)
+			}
+
+			err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if entry.IsDir() {
+					if entry.Name() == "secrets" {
+						t.Errorf("Snapshot must not contain a secrets directory, found %s", path)
+					}
+					return nil
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				if strings.Contains(string(data), unwantedContent) {
+					t.Errorf("Snapshot file %s contains Secret data", path)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("Failed to inspect snapshot directory: %v", err)
+			}
+		})
+	}
+}
+
+// newSnapshotSourceDir returns a directory with a single captured file to archive.
+func newSnapshotSourceDir(t *testing.T) string {
+	t.Helper()
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "pod.yaml"), []byte("kind: Pod"), 0600); err != nil {
+		t.Fatalf("Failed to write snapshot source file: %v", err)
+	}
+	return srcDir
+}
+
+// countArchiveCreations wraps createArchive and reports how often an archive is built during the test.
+func countArchiveCreations(t *testing.T) *int {
+	t.Helper()
+	orig := createArchive
+	calls := 0
+	createArchive = func(srcDir, archivePath string) error {
+		calls++
+		return orig(srcDir, archivePath)
+	}
+	t.Cleanup(func() { createArchive = orig })
+	return &calls
+}
+
+// stubUpload replaces the GCS upload with fn for the duration of the test.
+func stubUpload(t *testing.T, fn func(ctx context.Context, options gcs.UploadOptions) error) {
+	t.Helper()
+	orig := uploadFile
+	uploadFile = fn
+	t.Cleanup(func() { uploadFile = orig })
+}
+
+// listArchives returns the snapshot archives found in dir.
+func listArchives(t *testing.T, dir string) []string {
+	t.Helper()
+	archives, err := filepath.Glob(filepath.Join(dir, "snapshots-all-clusters-*.tar.gz"))
+	if err != nil {
+		t.Fatalf("Failed to list archives in %s: %v", dir, err)
+	}
+	return archives
+}
+
+func TestPersistArchive_HandsSameArchiveToAllDestinations(t *testing.T) {
+	srcDir := newSnapshotSourceDir(t)
+	localDir := filepath.Join(t.TempDir(), "run-1", "3-deploy-gardener")
+	archiveCreations := countArchiveCreations(t)
+
+	var uploaded []gcs.UploadOptions
+	stubUpload(t, func(_ context.Context, options gcs.UploadOptions) error {
+		uploaded = append(uploaded, options)
+		return nil
+	})
+
+	err := PersistArchive(context.Background(), srcDir, "all-clusters", ArchiveDestinations{
+		LocalDir: localDir,
+		Upload:   &DestinationConfig{Bucket: "private-bucket", DestDir: "release-pipeline-snapshots/run-1"},
+	})
+	if err != nil {
+		t.Fatalf("PersistArchive failed: %v", err)
+	}
+
+	if *archiveCreations != 1 {
+		t.Errorf("Expected the archive to be built once, got %d builds", *archiveCreations)
+	}
+	archives := listArchives(t, localDir)
+	if len(archives) != 1 {
+		t.Fatalf("Expected exactly one local archive, got %v", archives)
+	}
+	if len(uploaded) != 1 {
+		t.Fatalf("Expected exactly one upload, got %d", len(uploaded))
+	}
+	if uploaded[0].LocalFilePath != archives[0] {
+		t.Errorf("Expected the local archive %s to be uploaded, got %s", archives[0], uploaded[0].LocalFilePath)
+	}
+	if uploaded[0].BucketName != "private-bucket" {
+		t.Errorf("Unexpected bucket %q", uploaded[0].BucketName)
+	}
+	wantObject := "release-pipeline-snapshots/run-1/" + filepath.Base(archives[0])
+	if uploaded[0].ObjectName != wantObject {
+		t.Errorf("Expected object name %q, got %q", wantObject, uploaded[0].ObjectName)
+	}
+}
+
+func TestPersistArchive_LocalOnly(t *testing.T) {
+	srcDir := newSnapshotSourceDir(t)
+	localDir := t.TempDir()
+	stubUpload(t, func(context.Context, gcs.UploadOptions) error {
+		t.Error("Upload must not be attempted without a bucket")
+		return nil
+	})
+
+	for _, upload := range []*DestinationConfig{nil, {DestDir: "ignored-without-bucket"}} {
+		if err := PersistArchive(context.Background(), srcDir, "all-clusters", ArchiveDestinations{LocalDir: localDir, Upload: upload}); err != nil {
+			t.Fatalf("PersistArchive failed: %v", err)
+		}
+	}
+	if archives := listArchives(t, localDir); len(archives) == 0 {
+		t.Errorf("Expected a local archive in %s", localDir)
+	}
+}
+
+func TestPersistArchive_UploadOnlyStagesArchive(t *testing.T) {
+	srcDir := newSnapshotSourceDir(t)
+	archiveCreations := countArchiveCreations(t)
+
+	var stagedPath string
+	stubUpload(t, func(_ context.Context, options gcs.UploadOptions) error {
+		stagedPath = options.LocalFilePath
+		if _, err := os.Stat(stagedPath); err != nil {
+			t.Errorf("Expected the staged archive to exist during the upload: %v", err)
+		}
+		return nil
+	})
+
+	err := PersistArchive(context.Background(), srcDir, "all-clusters", ArchiveDestinations{
+		Upload: &DestinationConfig{Bucket: "private-bucket", DestDir: "dest"},
+	})
+	if err != nil {
+		t.Fatalf("PersistArchive failed: %v", err)
+	}
+	if *archiveCreations != 1 {
+		t.Errorf("Expected the archive to be built once, got %d builds", *archiveCreations)
+	}
+	if stagedPath == "" {
+		t.Fatal("Expected the archive to be uploaded")
+	}
+	if _, err := os.Stat(stagedPath); !os.IsNotExist(err) {
+		t.Errorf("Expected the staged archive %s to be removed after the upload, got err=%v", stagedPath, err)
+	}
+}
+
+func TestPersistArchive_KeepsLocalArchiveWhenUploadFails(t *testing.T) {
+	srcDir := newSnapshotSourceDir(t)
+	localDir := t.TempDir()
+	stubUpload(t, func(context.Context, gcs.UploadOptions) error {
+		return fmt.Errorf("simulated upload failure")
+	})
+
+	err := PersistArchive(context.Background(), srcDir, "all-clusters", ArchiveDestinations{
+		LocalDir: localDir,
+		Upload:   &DestinationConfig{Bucket: "private-bucket", DestDir: "dest"},
+	})
+	if err != nil {
+		t.Fatalf("Expected the local archive to be sufficient, got error: %v", err)
+	}
+	if archives := listArchives(t, localDir); len(archives) != 1 {
+		t.Errorf("Expected exactly one local archive, got %v", archives)
+	}
+}
+
+func TestPersistArchive_FailsWhenNothingPersisted(t *testing.T) {
+	srcDir := newSnapshotSourceDir(t)
+
+	// A regular file where the local directory should be makes local persistence fail.
+	blockingFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockingFile, nil, 0600); err != nil {
+		t.Fatalf("Failed to create blocking file: %v", err)
+	}
+	unusableLocalDir := filepath.Join(blockingFile, "snapshots")
+
+	stubUpload(t, func(context.Context, gcs.UploadOptions) error {
+		return fmt.Errorf("simulated upload failure")
+	})
+
+	tests := []struct {
+		name    string
+		dest    ArchiveDestinations
+		wantErr string
+	}{
+		{
+			name:    "no destination configured",
+			dest:    ArchiveDestinations{},
+			wantErr: "no snapshot destination configured",
+		},
+		{
+			name:    "bucket missing and no local directory",
+			dest:    ArchiveDestinations{Upload: &DestinationConfig{DestDir: "dest"}},
+			wantErr: "no snapshot destination configured",
+		},
+		{
+			name:    "local directory unusable",
+			dest:    ArchiveDestinations{LocalDir: unusableLocalDir},
+			wantErr: "not persisted to any destination",
+		},
+		{
+			name: "local directory unusable and upload fails",
+			dest: ArchiveDestinations{
+				LocalDir: unusableLocalDir,
+				Upload:   &DestinationConfig{Bucket: "private-bucket", DestDir: "dest"},
+			},
+			wantErr: "simulated upload failure",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := PersistArchive(context.Background(), srcDir, "all-clusters", tc.dest)
+			if err == nil {
+				t.Fatal("Expected an error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Expected error to contain %q, got %q", tc.wantErr, err)
+			}
+		})
 	}
 }

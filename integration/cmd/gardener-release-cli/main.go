@@ -63,6 +63,9 @@ func runCheckReleaseJobStatus(cmdName string, args []string) {
 		fmt.Printf("Error loading configuration: %v\n", err)
 		os.Exit(1)
 	}
+	defer func() {
+		_ = cliCfg.Cleanup()
+	}()
 
 	fmt.Println("Fetching Cluster Status...")
 	activeJobs, availableClusters, err := cliCfg.GetStatus(context.Background())
