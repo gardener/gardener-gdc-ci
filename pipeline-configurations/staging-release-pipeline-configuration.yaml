@@ -12,21 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-gcp:
-  # GKE clusters that hosts the virtual garden clusters to use.
-  gkeClusters:
-    - name: staging-runtime-1
-      zone: us-west1
-      project: dilipkumardk-gardener-lab
-    - name: staging-runtime-2
-      zone: us-west1
-      project: dilipkumardk-gardener-lab
-    - name: staging-runtime-3
-      zone: us-west1
-      project: dilipkumardk-gardener-lab
-    - name: staging-runtime-4
-      zone: us-west1
-      project: dilipkumardk-gardener-lab
 gdc:
   project: sapbtp
   org: gdc1
@@ -43,11 +28,16 @@ gdc:
   parentPrivateSubnetGroup: release-pipeline-parent-subnet-group
   parentPublicSubnetGroup: release-pipeline-parent-public-subnet-group
   dualZoneBucketLocation: async-grover-gonzo
+  virtualGardenClusters:
+    # Vanilla user clusters that host Virtual Garden clusters to use for the pipeline
+    - name: gardener-grover-4
+      zone: us-west6-a
+      project: sapbtp
   userClusters:
-  # Vanilla user clusters that host Shoot clusters to use for remote seed
-  - name: gardener-grover-3
-    zone: us-west6-a
-    project: sapbtp
+    # Vanilla user clusters that host Shoot clusters to use for remote seed
+    - name: gardener-grover-3
+      zone: us-west6-a
+      project: sapbtp
   secondaryProject: sap-gardener
 gardener:
   gardenerVersion: v1.154.1

@@ -16,7 +16,7 @@ source "${REPO_ROOT}/scripts/ci-common.sh"
 echo "=== Stage 6: Run Shoot Functional & CNCF Conformance Test Suites ==="
 
 GARDENER_ARTIFACTS_VERSION="$(yq -r '.gardenerArtifactsVersion' "${RELEASE_METADATA_FILE}")"
-VIRTUAL_GARDEN_PROVIDER="${VIRTUAL_GARDEN_PROVIDER:-gke}"
+VIRTUAL_GARDEN_PROVIDER="${VIRTUAL_GARDEN_PROVIDER:-gdc}"
 SKIP_CONFORMANCE="${SKIP_CONFORMANCE:-false}"
 
 # Ensure Sonobuoy CLI is installed for conformance testing
@@ -62,16 +62,18 @@ done
 
 if [[ "${SKIP_CONFORMANCE}" != "true" ]]; then
   echo "--- Running CNCF Kubernetes Conformance Suite (Sonobuoy) ---"
-  if ! go test -v -timeout=120m "${REPO_ROOT}/integration/release/conformance" \
+  if ! go test -v -timeout=120m -run '^TestShootConformance$' "${REPO_ROOT}/integration/release/conformance" \
     -args \
     --release-configuration-file-path="${UPDATED_PIPELINE_CONFIG_FILE}" \
-    --gardener-artifacts-version="${GARDENER_ARTIFACTS_VERSION}"; then
+    --gardener-artifacts-version="${GARDENER_ARTIFACTS_VERSION}" \
+    --virtual-garden-provider="${VIRTUAL_GARDEN_PROVIDER}"; then
     echo "Warning: Shoot test suite 'conformance' failed on first attempt. Retrying after 30s..."
     sleep 30
-    if ! go test -v -timeout=120m "${REPO_ROOT}/integration/release/conformance" \
+    if ! go test -v -timeout=120m -run '^TestShootConformance$' "${REPO_ROOT}/integration/release/conformance" \
       -args \
       --release-configuration-file-path="${UPDATED_PIPELINE_CONFIG_FILE}" \
-      --gardener-artifacts-version="${GARDENER_ARTIFACTS_VERSION}"; then
+      --gardener-artifacts-version="${GARDENER_ARTIFACTS_VERSION}" \
+      --virtual-garden-provider="${VIRTUAL_GARDEN_PROVIDER}"; then
       echo "::error::Shoot test suite 'conformance' failed."
       FAILED_SUITES+=("conformance")
     fi

@@ -16,13 +16,15 @@ echo "=== Stage 4: Deploy GDC Seed Cluster (Gardenlet) ==="
 GARDENER_ARTIFACTS_VERSION="$(yq -r '.gardenerArtifactsVersion' "${RELEASE_METADATA_FILE}")"
 MCM_PROVIDER_GDC_ARTIFACTS_VERSION="$(yq -r '.mcmProviderGDCArtifactsVersion // .gardenerArtifactsVersion' "${RELEASE_METADATA_FILE}")"
 CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION="$(yq -r '.cloudProviderGDCArtifactsVersion // .gardenerArtifactsVersion' "${RELEASE_METADATA_FILE}")"
+VIRTUAL_GARDEN_PROVIDER="${VIRTUAL_GARDEN_PROVIDER:-gdc}"
 
 if ! go test -v -timeout=65m -run '^TestCreateSeedCluster$' "${REPO_ROOT}/integration/release/seed" \
   -args \
   --release-configuration-file-path="${UPDATED_PIPELINE_CONFIG_FILE}" \
   --gardener-artifacts-version="${GARDENER_ARTIFACTS_VERSION}" \
   --mcm-artifacts-version="${MCM_PROVIDER_GDC_ARTIFACTS_VERSION}" \
-  --ccm-artifacts-version="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}"; then
+  --ccm-artifacts-version="${CLOUD_PROVIDER_GDC_ARTIFACTS_VERSION}" \
+  --virtual-garden-provider="${VIRTUAL_GARDEN_PROVIDER}"; then
   capture_snapshot "4-deploy-seed"
   exit 1
 fi

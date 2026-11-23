@@ -50,7 +50,7 @@ var (
 	externalDNSArtifactsVersion    = flag.String("external-dns-artifacts-version", "", "The short artifacts version for external-dns-management repo")
 	externalDNSManagementImageName = flag.String("external-dns-management-image-name", "external-dnsman2-gdch", "The name of the external DNS management image")
 	releaseConfigurationFilePath   = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
-	virtualGardenProvider          = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
+	virtualGardenProvider          = flag.String("virtual-garden-provider", "gdc", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 	subnetPrefixLength             = flag.Int("subnet-prefix-length", defaultSubnetPrefixLength, "The prefix length for the Shoot parent subnet (default /27 preserves 32 IPs in a /26 parent subnet group for Stage 6 LoadBalancer /31 allocations)")
 	numShoots                      = flag.Int("num-shoots", 1, "The number of Shoot clusters to create")
 	workerPoolMinimum              = flag.Int("worker-pool-minimum", 2, "The minimum number of machines per Shoot cluster")

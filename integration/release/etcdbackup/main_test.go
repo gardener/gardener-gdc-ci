@@ -35,7 +35,7 @@ var (
 	gardenerArtifactsVersion        = flag.String("gardener-artifacts-version", "", "The version string for Gardener artifacts")
 	releaseConfigurationFilePath    = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
 	continuousConfigurationFilePath = flag.String("continuous-configuration-file-path", "", "the path to the continuous configuration file")
-	virtualGardenProvider           = flag.String("virtual-garden-provider", "gke", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
+	virtualGardenProvider           = flag.String("virtual-garden-provider", "gdc", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 )
 
 const (

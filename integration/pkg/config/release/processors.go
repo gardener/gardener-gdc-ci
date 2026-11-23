@@ -90,7 +90,12 @@ func findGardenClusterFromGKEClustersPool(ctx context.Context, runtimeClusters [
 	var unannotatedGarden *operatorv1alpha1.Garden
 	var unannotatedClusterName string
 
-	for clusterName, clusterClient := range clusterClients {
+	for _, rc := range runtimeClusters {
+		clusterName := rc.Name
+		clusterClient, exists := clusterClients[clusterName]
+		if !exists {
+			return nil, nil, "", nil, false, fmt.Errorf("client not found for GKE cluster %q", clusterName)
+		}
 		gardenList := &operatorv1alpha1.GardenList{}
 		if err := clusterClient.List(ctx, gardenList); err != nil && !meta.IsNoMatchError(err) {
 			return nil, nil, "", nil, false, fmt.Errorf("failed to list Garden resources in cluster %q: %w\n", clusterName, err)
@@ -192,7 +197,12 @@ func findShootClusterToHostSeed(ctx context.Context, userClusters []config.Runti
 		return nil, nil, nil, false, fmt.Errorf("failed to get user cluster clients: %w", err)
 	}
 
-	for userClusterName, userClusterClient := range userClusterClients {
+	for _, uc := range userClusters {
+		userClusterName := uc.Name
+		userClusterClient, exists := userClusterClients[userClusterName]
+		if !exists {
+			return nil, nil, nil, false, fmt.Errorf("client not found for GDC user cluster %q", userClusterName)
+		}
 		virtualGardenConfig, err := config.GetGardenClient(ctx, userClusterClient)
 		if err != nil {
 			log.Printf("INFO: could not get garden client from runtime cluster %q, skipping: %v", userClusterName, err)
@@ -305,6 +315,9 @@ func findShootInGarden(ctx context.Context, gardenClient client.WithWatch, garde
 }
 
 var gdcloudInit = func(ctx context.Context, pipelineCfg *pipelineConfig) (*gdcloud.TestingClient, error) {
+	if opts, ok := ctx.Value(optionsKey{}).(*LoadOptions); ok && opts != nil && opts.LocalGDCloudSessionFallback {
+		return config.GetGDCClientWithLocalFallback(ctx, pipelineCfg.GDC.CAData, pipelineCfg.GDC.ConsoleURL)
+	}
 	return config.GetGDCClient(ctx, pipelineCfg.GDC.CAData, pipelineCfg.GDC.ConsoleURL)
 }
 
@@ -389,7 +402,12 @@ func findGardenClusterFromGDCUserClustersPool(ctx context.Context, runtimeCluste
 	var unannotatedGarden *operatorv1alpha1.Garden
 	var unannotatedClusterName string
 
-	for clusterName, clusterClient := range userClusterClients {
+	for _, rc := range runtimeClusters {
+		clusterName := rc.Name
+		clusterClient, exists := userClusterClients[clusterName]
+		if !exists {
+			return nil, nil, "", nil, false, fmt.Errorf("client not found for GDC user cluster %q", clusterName)
+		}
 		gardenList := &operatorv1alpha1.GardenList{}
 		if err := clusterClient.List(ctx, gardenList); err != nil && !meta.IsNoMatchError(err) {
 			return nil, nil, "", nil, false, fmt.Errorf("failed to list Garden resources in cluster %q: %w\n", clusterName, err)

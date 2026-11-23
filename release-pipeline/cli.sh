@@ -6,10 +6,10 @@
 # cli.sh is the unified command-line entry point for inspecting and managing
 # Gardener GDC release pipeline test environments locally.
 # Supported actions:
-#   - status (default): Queries GKE runtime clusters and GDC user clusters to
-#     display active release test jobs and available idle clusters.
+#   - status (default): Queries GDC Virtual Garden runtime clusters and GDC Soil
+#     user clusters to display active release test jobs and available idle clusters.
 #   - fetch-kubeconfigs: Delegates to refresh-kubeconfigs.sh to populate
-#     /tmp/kubeconfigs/ for all configured clusters.
+#     /tmp/kubeconfigs/ for all configured GDC clusters, Virtual Gardens, and Shoots.
 #   - teardown: Delegates to teardown.sh to clean up test resources and release
 #     cluster locks for a given gardener-artifacts version.
 
@@ -30,15 +30,26 @@ fi
 # cluster for a specific gardener-artifacts version.
 COMMIT_HASH_ANNOTATION="integration.release.sapbtp.gardener/commit-hash"
 
+CLI_TMP_DIR=""
+cleanup_cli_tmp() {
+  if [[ -n "${CLI_TMP_DIR:-}" && -d "${CLI_TMP_DIR}" ]]; then
+    rm -rf "${CLI_TMP_DIR}"
+  fi
+}
+trap cleanup_cli_tmp EXIT
+
 usage() {
   cat << 'EOF'
+Usage:
+  ./release-pipeline/cli.sh [--action=<status|fetch-kubeconfigs|teardown>] [--config=<path>] [--virtual-garden-provider=<gdc|gke>] [extra_args...]
+
 Usage examples:
 
 1. Get status (default action):
    ./release-pipeline/cli.sh
    ./release-pipeline/cli.sh --action=status
 
-2. Fetch kubeconfigs:
+2. Fetch / refresh GDC kubeconfigs into /tmp/kubeconfigs/:
    ./release-pipeline/cli.sh --action=fetch-kubeconfigs
 
 3. Specify a custom configuration file:
@@ -46,10 +57,23 @@ Usage examples:
    (Default config: pipeline-configurations/staging-release-pipeline-configuration.yaml)
 
 4. Teardown an active test environment for a specific gardener-artifacts version:
-   ./release-pipeline/cli.sh --action=teardown --gardener-artifacts-version=v1.0 --config=/path/to/config.yaml
+   ./release-pipeline/cli.sh --action=teardown --gardener-artifacts-version=v0.5.3-dev-1234567
+   ./release-pipeline/cli.sh --action=teardown --gardener-artifacts-version=v0.5.3-dev-1234567 --config=/path/to/config.yaml
 
-Note: Any additional arguments are passed directly to the underlying scripts.
+Note: Any additional action-specific arguments are passed directly to the underlying scripts.
 EOF
+}
+
+validate_virtual_garden_provider() {
+  local provider="$1"
+  case "$provider" in
+    gdc|gke)
+      ;;
+    *)
+      echo "Error: unsupported --virtual-garden-provider '${provider}' (supported: 'gdc', 'gke')" >&2
+      exit 1
+      ;;
+  esac
 }
 
 # sanitize_hash extracts the short commit hash suffix from a version string
@@ -127,26 +151,51 @@ extract_virtual_garden_kubeconfig() {
   if [[ -z "$b64" ]]; then
     return 1
   fi
-  printf '%s' "$b64" | base64 -d > "$output_path"
+  (
+    umask 077
+    printf '%s' "$b64" | base64 -d > "$output_path"
+  )
 }
 
-# run_status inspects all GKE runtime clusters and GDC user clusters defined in
-# the pipeline configuration YAML ($1), correlates active test runs by their
-# commit-hash annotation, and prints the Active Release Jobs and Available
+# resolve_gdc_user_cluster_kubeconfig returns a working kubeconfig path for a
+# GDC user cluster, reusing /tmp/kubeconfigs/<name>-kubeconfig when valid and
+# otherwise fetching fresh credentials into $CLI_TMP_DIR via gdcloud.
+resolve_gdc_user_cluster_kubeconfig() {
+  local uc_name="$1"
+  local uc_project="$2"
+  local uc_zone="$3"
+
+  local cached_kc="/tmp/kubeconfigs/${uc_name}-kubeconfig"
+  if [[ -s "$cached_kc" ]] && kubectl --kubeconfig "$cached_kc" --request-timeout=10s get ns default >/dev/null 2>&1; then
+    printf '%s' "$cached_kc"
+    return 0
+  fi
+
+  local tmp_kc="${CLI_TMP_DIR}/${uc_name}-kubeconfig"
+  if (umask 077 && KUBECONFIG="$tmp_kc" gdcloud clusters get-credentials "$uc_name" --standard --project "$uc_project" --zone "$uc_zone" >/dev/null 2>&1); then
+    printf '%s' "$tmp_kc"
+    return 0
+  fi
+
+  return 1
+}
+
+# run_status inspects the configured GDC Virtual Garden runtime clusters (or GKE
+# runtime clusters when --virtual-garden-provider=gke) and GDC Soil user clusters
+# defined in the pipeline configuration YAML ($1), correlates active test runs by
+# their commit-hash annotation, and prints the Active Release Jobs and Available
 # Clusters tables.
 run_status() {
   local config_file="$1"
+  local vg_provider="$2"
+
   if [[ ! -f "$config_file" ]]; then
     echo "Error: configuration file not found: $config_file" >&2
     exit 1
   fi
 
   echo "Loading configuration..."
-  # Create a temporary directory for any ephemeral kubeconfigs fetched during
-  # this status check and clean it up automatically on script exit.
-  local tmp_dir
-  tmp_dir="$(mktemp -d /tmp/gardener-cli-status.XXXXXX)"
-  trap "rm -rf '${tmp_dir}'" EXIT
+  CLI_TMP_DIR="$(mktemp -d /tmp/gardener-cli-status.XXXXXX)"
 
   # Accumulators:
   # - available_json: JSON array of [name, type, hosted_by] rows for idle clusters.
@@ -156,146 +205,180 @@ run_status() {
 
   echo "Fetching Cluster Status..."
 
-  # ---------------------------------------------------------------------------
-  # 1. Inspect GCP GKE Runtime Clusters (Virtual Garden Hosts)
-  # ---------------------------------------------------------------------------
-  local gke_count
-  gke_count=$(yq eval '.gcp.gkeClusters | length' "$config_file")
-  if [[ "$gke_count" -gt 0 && "$gke_count" != "null" ]]; then
-    for (( i=0; i<gke_count; i++ )); do
-      local cluster_name zone project
-      cluster_name=$(yq eval ".gcp.gkeClusters[$i].name" "$config_file")
-      zone=$(yq eval ".gcp.gkeClusters[$i].zone" "$config_file")
-      project=$(yq eval ".gcp.gkeClusters[$i].project" "$config_file")
+  # Helper: inspect_vg_host_cluster <cluster_name> <kubeconfig> <type_label> <hosted_by>
+  inspect_vg_host_cluster() {
+    local cluster_name="$1"
+    local kubeconfig="$2"
+    local type_label="$3"
+    local hosted_by="$4"
 
-      # Reuse cached kubeconfig from /tmp/kubeconfigs/ if present; otherwise
-      # fetch credentials into the temporary directory via gcloud.
-      local kubeconfig="/tmp/kubeconfigs/${cluster_name}-kubeconfig"
-      if [[ ! -s "$kubeconfig" ]]; then
-        kubeconfig="${tmp_dir}/${cluster_name}-kubeconfig"
-        KUBECONFIG="$kubeconfig" gcloud container clusters get-credentials "$cluster_name" --region "$zone" --project "$project" >/dev/null 2>&1
+    local gardens_json
+    gardens_json=$(kubectl --kubeconfig "$kubeconfig" --request-timeout=15s get gardens.operator.gardener.cloud -A -o json 2>/dev/null || echo '{"items":[]}')
+
+    local item_count
+    item_count=$(jq '.items | length' <<< "$gardens_json")
+    for (( g=0; g<item_count; g++ )); do
+      local garden_name version
+      garden_name=$(jq -r ".items[$g].metadata.name" <<< "$gardens_json")
+      version=$(jq -r ".items[$g].metadata.annotations[\"${COMMIT_HASH_ANNOTATION}\"] // \"\"" <<< "$gardens_json")
+
+      # An unannotated Garden CR means the runtime cluster is idle and available.
+      if [[ -z "$version" ]]; then
+        available_json=$(jq -c \
+          --arg name "$cluster_name" \
+          --arg type "$type_label" \
+          --arg hosted "$hosted_by" \
+          '. + [[$name, $type, $hosted]]' <<< "$available_json")
+        continue
       fi
 
-      local hosted_by
-      hosted_by=$(printf "GKE: %s\n%s\n%s" "$cluster_name" "$project" "$zone")
+      # An annotated Garden CR indicates an active release job. Connect to its
+      # Virtual Garden API server to inspect any Seeds and Shoots created by the job.
+      local created_seeds="" created_shoots=""
+      local vg_kubeconfig="${CLI_TMP_DIR}/${cluster_name}-vg-kubeconfig"
+      if extract_virtual_garden_kubeconfig "$kubeconfig" "$vg_kubeconfig"; then
+        local sanitized_hash
+        sanitized_hash="$(sanitize_hash "$version")"
 
-      # List Garden CRs (gardens.operator.gardener.cloud) on the GKE runtime cluster.
-      local gardens_json
-      gardens_json=$(kubectl --kubeconfig "$kubeconfig" --request-timeout=15s get gardens.operator.gardener.cloud -A -o json 2>/dev/null || echo '{"items":[]}')
+        # Query Seed resources on the Virtual Garden matching the job's version/hash.
+        local seeds_raw shoots_raw
+        seeds_raw=$(kubectl --kubeconfig "$vg_kubeconfig" --request-timeout=15s get seeds -o json 2>/dev/null || echo '{"items":[]}')
+        created_seeds=$(jq -r \
+          --arg ver "$version" \
+          --arg hash "$sanitized_hash" \
+          --arg ann "$COMMIT_HASH_ANNOTATION" '
+          def seed_status:
+            if .status.lastOperation == null then "PENDING"
+            elif .status.lastOperation.progress != 100 then "\u001b[31mNOT READY\u001b[0m"
+            elif ([.status.conditions[]? | select(.status == "False")] | length) > 0 then "\u001b[31mNOT READY\u001b[0m"
+            else "\u001b[32mREADY\u001b[0m"
+            end;
+          [
+            .items[]
+            | select((.metadata.name | contains($hash)) or (.metadata.annotations[$ann] == $ver))
+            | "\(.metadata.name) [ \(seed_status) ]"
+          ] | join("\n")
+        ' <<< "$seeds_raw")
 
-      local item_count
-      item_count=$(jq '.items | length' <<< "$gardens_json")
-      for (( g=0; g<item_count; g++ )); do
-        local garden_name version
-        garden_name=$(jq -r ".items[$g].metadata.name" <<< "$gardens_json")
-        version=$(jq -r ".items[$g].metadata.annotations[\"${COMMIT_HASH_ANNOTATION}\"] // \"\"" <<< "$gardens_json")
+        # Query Shoot resources on the Virtual Garden matching the job's version/hash.
+        shoots_raw=$(kubectl --kubeconfig "$vg_kubeconfig" --request-timeout=15s get shoots -A -o json 2>/dev/null || echo '{"items":[]}')
+        created_shoots=$(jq -r \
+          --arg ver "$version" \
+          --arg hash "$sanitized_hash" \
+          --arg ann "$COMMIT_HASH_ANNOTATION" '
+          def shoot_status:
+            if .status.lastOperation == null then "PENDING"
+            else
+              (.status.lastOperation.state // "") as $st |
+              (.status.lastOperation.type // "") as $tp |
+              (.status.lastOperation.progress // 0) as $pr |
+              (if $st == "Succeeded" then "\u001b[32mSUCCEEDED\u001b[0m"
+               elif $st == "Processing" then "\u001b[34mPROCESSING\u001b[0m"
+               elif ($st == "Error" or $st == "Failed") then "\u001b[31m\($st)\u001b[0m"
+               else $st end) + " (\($tp) \($pr)%)"
+            end;
+          [
+            .items[]
+            | select((.metadata.name | contains($hash)) or (.metadata.annotations[$ann] == $ver))
+            | "\(.metadata.name) [ \(shoot_status) ]"
+          ] | join("\n")
+        ' <<< "$shoots_raw")
+      fi
 
-        # An unannotated Garden CR means the GKE runtime cluster is idle and available.
-        if [[ -z "$version" ]]; then
-          available_json=$(jq -c \
-            --arg name "$cluster_name" \
-            --arg type "GKE (Virtual Garden Host)" \
-            --arg hosted "$hosted_by" \
-            '. + [[$name, $type, $hosted]]' <<< "$available_json")
+      # Record or update the active job entry keyed by gardenerArtifactsVersion.
+      jobs_json=$(jq -c \
+        --arg ver "$version" \
+        --arg vg "$garden_name" \
+        --arg rt "$hosted_by" \
+        --arg seeds "$created_seeds" \
+        --arg shoots "$created_shoots" '
+        .[$ver] = ((.[$ver] // {
+          version: $ver,
+          runtimeCluster: "",
+          virtualGarden: "",
+          soilCluster: "",
+          createdSeeds: "",
+          createdShoots: ""
+        }) | .virtualGarden = $vg | .runtimeCluster = $rt | .createdSeeds = $seeds | .createdShoots = $shoots)
+      ' <<< "$jobs_json")
+    done
+  }
+
+  local use_uc_as_seed
+  use_uc_as_seed=$(yq eval '(.gdc.useUserClusterAsSeed // false)' "$config_file")
+
+  # ---------------------------------------------------------------------------
+  # 1. Inspect Virtual Garden Runtime Clusters
+  # ---------------------------------------------------------------------------
+  if [[ "$vg_provider" == "gdc" ]]; then
+    local vg_yq_path=".gdc.virtualGardenClusters"
+    local gdc_vg_count
+    gdc_vg_count=$(yq eval '(.gdc.virtualGardenClusters // []) | length' "$config_file")
+    if [[ ( "$gdc_vg_count" -eq 0 || "$gdc_vg_count" == "null" ) && "$use_uc_as_seed" == "true" ]]; then
+      vg_yq_path=".gdc.userClusters"
+      gdc_vg_count=$(yq eval '(.gdc.userClusters // []) | length' "$config_file")
+    fi
+
+    if [[ "$gdc_vg_count" -gt 0 && "$gdc_vg_count" != "null" ]]; then
+      for (( i=0; i<gdc_vg_count; i++ )); do
+        local vg_uc_name vg_uc_zone vg_uc_project vg_uc_kubeconfig
+        vg_uc_name=$(yq eval "${vg_yq_path}[$i].name" "$config_file")
+        vg_uc_zone=$(yq eval "${vg_yq_path}[$i].zone" "$config_file")
+        vg_uc_project=$(yq eval "${vg_yq_path}[$i].project" "$config_file")
+
+        if ! vg_uc_kubeconfig=$(resolve_gdc_user_cluster_kubeconfig "$vg_uc_name" "$vg_uc_project" "$vg_uc_zone"); then
+          echo "Warning: could not get credentials for GDC Virtual Garden host cluster '$vg_uc_name'; skipping it (is the local gdcloud session still valid?)." >&2
           continue
         fi
 
-        # An annotated Garden CR indicates an active release job. Connect to its
-        # Virtual Garden API server to inspect any Seeds and Shoots created by the job.
-        local created_seeds="" created_shoots=""
-        local vg_kubeconfig="${tmp_dir}/${cluster_name}-vg-kubeconfig"
-        if extract_virtual_garden_kubeconfig "$kubeconfig" "$vg_kubeconfig"; then
-          local sanitized_hash
-          sanitized_hash="$(sanitize_hash "$version")"
+        local gdc_vg_hosted_by
+        gdc_vg_hosted_by=$(printf "GDC: %s\n%s\n%s" "$vg_uc_name" "$vg_uc_project" "$vg_uc_zone")
+        inspect_vg_host_cluster "$vg_uc_name" "$vg_uc_kubeconfig" "GDC (Virtual Garden Host)" "$gdc_vg_hosted_by"
+      done
+    fi
+  else
+    local gke_count
+    gke_count=$(yq eval '(.gcp.gkeClusters // []) | length' "$config_file")
+    if [[ "$gke_count" -gt 0 && "$gke_count" != "null" ]]; then
+      for (( i=0; i<gke_count; i++ )); do
+        local cluster_name zone project kubeconfig
+        cluster_name=$(yq eval ".gcp.gkeClusters[$i].name" "$config_file")
+        zone=$(yq eval ".gcp.gkeClusters[$i].zone" "$config_file")
+        project=$(yq eval ".gcp.gkeClusters[$i].project" "$config_file")
 
-          # Query Seed resources on the Virtual Garden matching the job's version/hash.
-          local seeds_raw shoots_raw
-          seeds_raw=$(kubectl --kubeconfig "$vg_kubeconfig" --request-timeout=15s get seeds -o json 2>/dev/null || echo '{"items":[]}')
-          created_seeds=$(jq -r \
-            --arg ver "$version" \
-            --arg hash "$sanitized_hash" \
-            --arg ann "$COMMIT_HASH_ANNOTATION" '
-            def seed_status:
-              if .status.lastOperation == null then "PENDING"
-              elif .status.lastOperation.progress != 100 then "\u001b[31mNOT READY\u001b[0m"
-              elif ([.status.conditions[]? | select(.status == "False")] | length) > 0 then "\u001b[31mNOT READY\u001b[0m"
-              else "\u001b[32mREADY\u001b[0m"
-              end;
-            [
-              .items[]
-              | select((.metadata.name | contains($hash)) or (.metadata.annotations[$ann] == $ver))
-              | "\(.metadata.name) [ \(seed_status) ]"
-            ] | join("\n")
-          ' <<< "$seeds_raw")
-
-          # Query Shoot resources on the Virtual Garden matching the job's version/hash.
-          shoots_raw=$(kubectl --kubeconfig "$vg_kubeconfig" --request-timeout=15s get shoots -A -o json 2>/dev/null || echo '{"items":[]}')
-          created_shoots=$(jq -r \
-            --arg ver "$version" \
-            --arg hash "$sanitized_hash" \
-            --arg ann "$COMMIT_HASH_ANNOTATION" '
-            def shoot_status:
-              if .status.lastOperation == null then "PENDING"
-              else
-                (.status.lastOperation.state // "") as $st |
-                (.status.lastOperation.type // "") as $tp |
-                (.status.lastOperation.progress // 0) as $pr |
-                (if $st == "Succeeded" then "\u001b[32mSUCCEEDED\u001b[0m"
-                 elif $st == "Processing" then "\u001b[34mPROCESSING\u001b[0m"
-                 elif ($st == "Error" or $st == "Failed") then "\u001b[31m\($st)\u001b[0m"
-                 else $st end) + " (\($tp) \($pr)%)"
-              end;
-            [
-              .items[]
-              | select((.metadata.name | contains($hash)) or (.metadata.annotations[$ann] == $ver))
-              | "\(.metadata.name) [ \(shoot_status) ]"
-            ] | join("\n")
-          ' <<< "$shoots_raw")
+        kubeconfig="/tmp/kubeconfigs/${cluster_name}-kubeconfig"
+        if [[ ! -s "$kubeconfig" ]] || ! kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get ns default >/dev/null 2>&1; then
+          kubeconfig="${CLI_TMP_DIR}/${cluster_name}-kubeconfig"
+          (umask 077 && KUBECONFIG="$kubeconfig" gcloud container clusters get-credentials "$cluster_name" --region "$zone" --project "$project" >/dev/null 2>&1)
         fi
 
-        # Record or update the active job entry keyed by gardenerArtifactsVersion.
-        jobs_json=$(jq -c \
-          --arg ver "$version" \
-          --arg vg "$garden_name" \
-          --arg rt "$hosted_by" \
-          --arg seeds "$created_seeds" \
-          --arg shoots "$created_shoots" '
-          .[$ver] = ((.[$ver] // {
-            version: $ver,
-            runtimeCluster: "",
-            virtualGarden: "",
-            soilCluster: "",
-            createdSeeds: "",
-            createdShoots: ""
-          }) | .virtualGarden = $vg | .runtimeCluster = $rt | .createdSeeds = $seeds | .createdShoots = $shoots)
-        ' <<< "$jobs_json")
+        local hosted_by
+        hosted_by=$(printf "GKE: %s\n%s\n%s" "$cluster_name" "$project" "$zone")
+        inspect_vg_host_cluster "$cluster_name" "$kubeconfig" "GKE (Virtual Garden Host)" "$hosted_by"
       done
-    done
+    fi
   fi
 
   # ---------------------------------------------------------------------------
   # 2. Inspect GDC User Clusters (Hosting Soil Shoot Clusters for Seeds)
   # ---------------------------------------------------------------------------
   local uc_count
-  uc_count=$(yq eval '.gdc.userClusters | length' "$config_file")
-  if [[ "$uc_count" -gt 0 && "$uc_count" != "null" ]]; then
+  uc_count=$(yq eval '(.gdc.userClusters // []) | length' "$config_file")
+  if [[ "$use_uc_as_seed" != "true" && "$uc_count" -gt 0 && "$uc_count" != "null" ]]; then
     for (( i=0; i<uc_count; i++ )); do
-      local uc_name uc_zone uc_project
+      local uc_name uc_zone uc_project uc_kubeconfig
       uc_name=$(yq eval ".gdc.userClusters[$i].name" "$config_file")
       uc_zone=$(yq eval ".gdc.userClusters[$i].zone" "$config_file")
       uc_project=$(yq eval ".gdc.userClusters[$i].project" "$config_file")
 
-      # Reuse cached GDC user cluster kubeconfig if present; otherwise fetch
-      # credentials via gdcloud using the developer's local gdcloud session.
-      local uc_kubeconfig="/tmp/kubeconfigs/${uc_name}-kubeconfig"
-      if [[ ! -s "$uc_kubeconfig" ]]; then
-        uc_kubeconfig="${tmp_dir}/${uc_name}-kubeconfig"
-        KUBECONFIG="$uc_kubeconfig" gdcloud clusters get-credentials "$uc_name" --standard --project "$uc_project" --zone "$uc_zone" >/dev/null 2>&1 || continue
+      if ! uc_kubeconfig=$(resolve_gdc_user_cluster_kubeconfig "$uc_name" "$uc_project" "$uc_zone"); then
+        echo "Warning: could not get credentials for GDC user cluster '$uc_name'; skipping it (is the local gdcloud session still valid?)." >&2
+        continue
       fi
 
-      # Extract the Virtual Garden kubeconfig hosted on the GDC user cluster
-      # (falling back to a cached virtual-garden kubeconfig if available).
-      local vg_kubeconfig="${tmp_dir}/${uc_name}-vg-kubeconfig"
+      # Extract a fresh Virtual Garden kubeconfig from the GDC user cluster
+      # (falling back to a cached virtual-garden kubeconfig only if reachable).
+      local vg_kubeconfig="${CLI_TMP_DIR}/${uc_name}-vg-kubeconfig"
       if ! extract_virtual_garden_kubeconfig "$uc_kubeconfig" "$vg_kubeconfig"; then
         if [[ -s "/tmp/kubeconfigs/${uc_name}-virtual-garden-kubeconfig" ]]; then
           vg_kubeconfig="/tmp/kubeconfigs/${uc_name}-virtual-garden-kubeconfig"
@@ -307,7 +390,9 @@ run_status() {
       # List Shoot clusters on the GDC Virtual Garden (these Shoots act as Soil
       # clusters that host Gardener Seeds during release pipeline runs).
       local shoots_json
-      shoots_json=$(kubectl --kubeconfig "$vg_kubeconfig" --request-timeout=15s get shoots -A -o json 2>/dev/null || continue)
+      if ! shoots_json=$(kubectl --kubeconfig "$vg_kubeconfig" --request-timeout=15s get shoots -A -o json 2>/dev/null); then
+        continue
+      fi
 
       local gdc_hosted_by
       gdc_hosted_by=$(printf "GDC: %s\n%s\n%s" "$uc_name" "$uc_project" "$uc_zone")
@@ -395,15 +480,22 @@ DEFAULT_CONFIG="${REPO_ROOT}/pipeline-configurations/staging-release-pipeline-co
 
 ACTION="status"
 CONFIG="$DEFAULT_CONFIG"
+VIRTUAL_GARDEN_PROVIDER="${VIRTUAL_GARDEN_PROVIDER:-gdc}"
+SHOW_HELP="false"
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)
-      usage
-      exit 0
+      SHOW_HELP="true"
+      shift
       ;;
     --action)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --action requires a value" >&2
+        usage
+        exit 1
+      fi
       ACTION="$2"
       shift 2
       ;;
@@ -412,11 +504,29 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --config)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --config requires a value" >&2
+        usage
+        exit 1
+      fi
       CONFIG="$2"
       shift 2
       ;;
     --config=*)
       CONFIG="${1#*=}"
+      shift
+      ;;
+    --virtual-garden-provider)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --virtual-garden-provider requires a value" >&2
+        usage
+        exit 1
+      fi
+      VIRTUAL_GARDEN_PROVIDER="$2"
+      shift 2
+      ;;
+    --virtual-garden-provider=*)
+      VIRTUAL_GARDEN_PROVIDER="${1#*=}"
       shift
       ;;
     *)
@@ -426,15 +536,33 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+validate_virtual_garden_provider "$VIRTUAL_GARDEN_PROVIDER"
+
+if [[ "$SHOW_HELP" == "true" ]]; then
+  usage
+  exit 0
+fi
+
 case "$ACTION" in
   status)
-    run_status "$CONFIG"
+    if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+      echo "Error: unknown argument(s) for --action=status: ${EXTRA_ARGS[*]}" >&2
+      usage
+      exit 1
+    fi
+    run_status "$CONFIG" "$VIRTUAL_GARDEN_PROVIDER"
     ;;
   fetch-kubeconfigs)
-    "${REPO_ROOT}/release-pipeline/refresh-kubeconfigs.sh" --config "$CONFIG" "${EXTRA_ARGS[@]}"
+    "${REPO_ROOT}/release-pipeline/refresh-kubeconfigs.sh" \
+      --config="$CONFIG" \
+      --virtual-garden-provider="$VIRTUAL_GARDEN_PROVIDER" \
+      "${EXTRA_ARGS[@]}"
     ;;
   teardown)
-    "${REPO_ROOT}/release-pipeline/teardown.sh" --config="$CONFIG" "${EXTRA_ARGS[@]}"
+    "${REPO_ROOT}/release-pipeline/teardown.sh" \
+      --config="$CONFIG" \
+      --virtual-garden-provider="$VIRTUAL_GARDEN_PROVIDER" \
+      "${EXTRA_ARGS[@]}"
     ;;
   *)
     echo "Unknown action: $ACTION" >&2

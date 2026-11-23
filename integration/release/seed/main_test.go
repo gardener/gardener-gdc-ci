@@ -35,6 +35,7 @@ import (
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,6 +57,7 @@ var (
 	mcmArtifactsVersion          string
 	ccmArtifactsVersion          string
 	releaseConfigurationFilePath = flag.String("release-configuration-file-path", "", "the path to the release configuration file")
+	virtualGardenProvider        = flag.String("virtual-garden-provider", "gdc", "the provider type hosting the Virtual Garden ('gke' or 'gdc')")
 )
 
 const (
@@ -133,7 +135,11 @@ func TestCreateSeedCluster(t *testing.T) {
 	ctx := context.Background()
 
 	t.Logf("Loading release configuration from %s", *releaseConfigurationFilePath)
-	releaseConfigData, err := releaseConfig.LoadReleaseTestConfig(*releaseConfigurationFilePath, gardenerArtifactsVersion)
+	releaseConfigData, err := releaseConfig.LoadReleaseTestConfig(
+		*releaseConfigurationFilePath,
+		gardenerArtifactsVersion,
+		releaseConfig.WithVirtualGardenProvider(*virtualGardenProvider),
+	)
 	if err != nil {
 		t.Fatalf("failed to load release configuration: %v", err)
 	}
@@ -802,17 +808,20 @@ func suppressRemoteShootTargetVPA(ctx context.Context, releaseConfigData *config
 	}
 	targetClient := shootClients.WatchClient
 
-	// Suspend target resource-manager RBAC and remove host Shoot VPA target bindings/webhook on the Seed host cluster.
-	crb := &unstructured.Unstructured{}
-	crb.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "rbac.authorization.k8s.io",
-		Version: "v1",
-		Kind:    "ClusterRoleBinding",
-	})
-	if err := targetClient.Get(ctx, client.ObjectKey{Name: "gardener.cloud:target:resource-manager"}, crb); err == nil {
-		unstructured.RemoveNestedField(crb.Object, "subjects")
+	// Ensure target resource-manager RBAC retains its subject so token-requestor continues renewing
+	// shoot-access-* (including kubevirt-csi-controller) tokens; shoot-core-vpa is already paused via
+	// resources.gardener.cloud/ignore=true on the host user cluster above.
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := targetClient.Get(ctx, client.ObjectKey{Name: "gardener.cloud:target:resource-manager"}, crb); err == nil && len(crb.Subjects) == 0 {
+		crb.Subjects = []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      "gardener-resource-manager",
+			Namespace: "kube-system",
+		}}
 		_ = targetClient.Update(ctx, crb)
 	}
+
+	// Remove host Shoot VPA target bindings and webhook on the Seed host cluster.
 
 	targetVPACRBs := []string{
 		"gardener.cloud:vpa:target:actor",
