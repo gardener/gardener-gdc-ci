@@ -195,14 +195,14 @@ jobs:
       - name: Determine Gardener OCI Registry Parameters
         id: gardener_params
         if: success() && (github.event_name == 'schedule' || inputs.publish_to_public_registry == true)
-        uses: gardener/cc-utils/.github/actions/params@v1
+        uses: gardener/cc-utils/.github/actions/params@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           mode: ${{ env.RELEASE_MODE }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Authenticate to Gardener Public Registry (OIDC via gardener/cc-utils)
         if: success() && steps.gardener_params.outputs.can-push == 'true' && (github.event_name == 'schedule' || inputs.publish_to_public_registry == true)
-        uses: gardener/cc-utils/.github/actions/oci-auth@v1
+        uses: gardener/cc-utils/.github/actions/oci-auth@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           oci-image-reference: ${{ steps.gardener_params.outputs.oci-registry }},ghcr.io/gardener
           gh-token: ${{ secrets.GITHUB_TOKEN }}
@@ -273,7 +273,7 @@ jobs:
       - name: Create OCM Base Component Descriptor
         id: ocm_base
         if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.publish == 'true'
-        uses: gardener/cc-utils/.github/actions/base-component-descriptor@v1
+        uses: gardener/cc-utils/.github/actions/base-component-descriptor@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           base-component: ${{ steps.ocm_inputs.outputs.base_component }}
           version: ${{ steps.ocm_inputs.outputs.version }}
@@ -282,7 +282,7 @@ jobs:
       - name: Export Certified Artifacts as OCM Fragments
         id: ocm_resources
         if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.publish == 'true'
-        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@v1
+        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           ocm-resources-file: /tmp/gardener-gdc-release/ocm-resources.json
           ctx: gdc-certified
@@ -303,7 +303,7 @@ jobs:
       - name: Export Release Notes OCM Fragment
         id: ocm_notes
         if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.attach == 'true'
-        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@v1
+        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           ctx: gdc-certified
           blobs-directory: /tmp/gardener-gdc-release/blobs.d
@@ -331,7 +331,7 @@ jobs:
       - name: Export gosec SAST Report OCM Fragment
         id: ocm_sast
         if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.sast == 'true'
-        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@v1
+        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           ctx: gdc-certified
           blobs-directory: /tmp/gardener-gdc-release/blobs.d
@@ -358,7 +358,7 @@ jobs:
       - name: Merge OCM Component Descriptor
         id: ocm_merge
         if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.publish == 'true'
-        uses: gardener/cc-utils/.github/actions/merge-ocm-fragments@v1
+        uses: gardener/cc-utils/.github/actions/merge-ocm-fragments@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           component-descriptor-artefact: base-component-descriptor
           ctx: gdc-certified
@@ -388,7 +388,7 @@ jobs:
       - name: Authenticate to OCM Repository
         id: ocm_auth
         if: steps.ocm_finalize.outcome == 'success'
-        uses: gardener/cc-utils/.github/actions/oci-auth@v1
+        uses: gardener/cc-utils/.github/actions/oci-auth@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           oci-image-reference: ${{ steps.gardener_params.outputs.ocm-repository }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
@@ -396,7 +396,7 @@ jobs:
       - name: Validate OCM Component Descriptor
         id: ocm_validate
         if: steps.ocm_finalize.outcome == 'success'
-        uses: gardener/cc-utils/.github/actions/ocm-validate@v1
+        uses: gardener/cc-utils/.github/actions/ocm-validate@bce63f62928717a11f610ec8022af9feb497d5df # v1
         with:
           component-descriptor-path: /tmp/gardener-gdc-release/ocm/component-descriptor.yaml
           validation-cfg: |
