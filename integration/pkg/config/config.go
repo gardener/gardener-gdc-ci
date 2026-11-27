@@ -17,11 +17,14 @@ package config
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	gardencorev1 "github.com/gardener/gardener/pkg/apis/core/v1"
@@ -115,7 +118,7 @@ var AccessLatestSecret = func(ctx context.Context, secretName string) ([]byte, e
 			return []byte(val), nil
 		}
 		if path := os.Getenv("GDC_SERVICE_ACCOUNT_FILE"); path != "" {
-			data, err := os.ReadFile(path)
+			data, err := os.ReadFile(filepath.Clean(path)) // #nosec G304 -- trusted CI credential file path from environment
 			if err != nil {
 				return nil, fmt.Errorf("failed to read GDC_SERVICE_ACCOUNT_FILE %q: %w", path, err)
 			}
@@ -127,7 +130,7 @@ var AccessLatestSecret = func(ctx context.Context, secretName string) ([]byte, e
 			return []byte(val), nil
 		}
 		if path := os.Getenv("HARBOR_DOCKER_CONFIG_FILE"); path != "" {
-			data, err := os.ReadFile(path)
+			data, err := os.ReadFile(filepath.Clean(path)) // #nosec G304 -- trusted CI Harbor credential file path from environment
 			if err != nil {
 				return nil, fmt.Errorf("failed to read HARBOR_DOCKER_CONFIG_FILE %q: %w", path, err)
 			}
@@ -149,25 +152,51 @@ func WriteToFile(pattern string, data []byte) (string, error) {
 	}
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("failed to write to temp file: %w", err)
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpFile.Name())
+		_ = os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("failed to close temp file %s: %w", tmpFile.Name(), err)
 	}
 
 	return tmpFile.Name(), nil
 }
 
-// FetchGDCCAData fetches the CA data from the console URL and returns it as a
-// base64 encoded string.
+var fetchCADataRetryDelay = 5 * time.Second
+
+func buildBootstrapTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+	bootstrapPEM := strings.TrimSpace(os.Getenv("GDC_BOOTSTRAP_CA_PEM"))
+	if bootstrapPEM == "" {
+		return tlsCfg, nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM([]byte(bootstrapPEM)) {
+		return nil, fmt.Errorf("GDC_BOOTSTRAP_CA_PEM does not contain any valid PEM certificate")
+	}
+	tlsCfg.RootCAs = pool
+	return tlsCfg, nil
+}
+
+// FetchGDCCAData fetches the CA data from the console URL over verified TLS and
+// returns it as a base64 encoded string. When GDC_BOOTSTRAP_CA_PEM is set, its
+// PEM certificates are added to the system trust pool for verification.
 var FetchGDCCAData = func(consoleURL string) (string, error) {
-	caDataURL := fmt.Sprintf("%s/.well-known/certificate-authority", consoleURL)
+	caDataURL := fmt.Sprintf("%s/.well-known/certificate-authority", strings.TrimRight(consoleURL, "/"))
+	tlsCfg, err := buildBootstrapTLSConfig()
+	if err != nil {
+		return "", err
+	}
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: tlsCfg,
 	}
 	httpClient := &http.Client{
 		Transport: tr,
@@ -178,17 +207,31 @@ var FetchGDCCAData = func(consoleURL string) (string, error) {
 		resp, err := httpClient.Get(caDataURL)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to fetch CA data from %s: %w", caDataURL, err)
-			if attempt < 6 {
-				time.Sleep(5 * time.Second)
+			if attempt < 6 && fetchCADataRetryDelay > 0 {
+				time.Sleep(fetchCADataRetryDelay)
 			}
 			continue
 		}
-		caData, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		caData, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
 		if readErr != nil {
 			lastErr = fmt.Errorf("failed to read CA data: %w", readErr)
-			if attempt < 6 {
-				time.Sleep(5 * time.Second)
+			if attempt < 6 && fetchCADataRetryDelay > 0 {
+				time.Sleep(fetchCADataRetryDelay)
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("unexpected HTTP status %d fetching CA data from %s", resp.StatusCode, caDataURL)
+			if attempt < 6 && fetchCADataRetryDelay > 0 {
+				time.Sleep(fetchCADataRetryDelay)
+			}
+			continue
+		}
+		if len(caData) == 0 {
+			lastErr = fmt.Errorf("empty CA bundle returned by %s", caDataURL)
+			if attempt < 6 && fetchCADataRetryDelay > 0 {
+				time.Sleep(fetchCADataRetryDelay)
 			}
 			continue
 		}

@@ -16,7 +16,9 @@ package auth
 
 import (
 	"crypto/ecdsa"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"time"
@@ -68,12 +70,20 @@ func signJWTWithKey(kid, key, sub, issuer, audience string) (string, error) {
 		return "", err
 	}
 
+	jtiBytes := make([]byte, 16)
+	if _, err := rand.Read(jtiBytes); err != nil {
+		return "", fmt.Errorf("generate jti: %w", err)
+	}
+
+	now := time.Now()
 	claims := jwt.RegisteredClaims{
+		ID:        hex.EncodeToString(jtiBytes),
 		Issuer:    issuer,
 		Subject:   sub,
 		Audience:  jwt.ClaimStrings{audience},
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
+		NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
+		ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+		IssuedAt:  jwt.NewNumericDate(now),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)

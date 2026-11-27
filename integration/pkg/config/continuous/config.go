@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	gardenv1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
 	"gopkg.in/yaml.v2"
@@ -98,7 +99,7 @@ func LoadReleaseTestConfig(continuousConfigurationFilePath string) (*config.Rele
 
 // loadPipelineConfig reads a YAML file from the given path and unmarshals it into a pipelineConfig struct.
 func loadPipelineConfig(continuousConfigurationFilePath string) (*pipelineConfig, error) {
-	yamlFile, err := os.ReadFile(continuousConfigurationFilePath)
+	yamlFile, err := os.ReadFile(filepath.Clean(continuousConfigurationFilePath)) // #nosec G304 -- trusted continuous testing configuration path
 	if err != nil {
 		return nil, fmt.Errorf("failed to read YAML file at %s: %w", continuousConfigurationFilePath, err)
 	}

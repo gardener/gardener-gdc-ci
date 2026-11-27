@@ -20,4 +20,10 @@ yq -i '
 if [[ "$(yq '.component.resources[] | select(.name == "gosec-report") | .name' "${descriptor_path}")" == "gosec-report" ]]; then
   yq -i '(.component.sources[] | select(.name == "main-source")).labels += [{"name": "cloud.gardener.cnudie/dso/scanning-hints/source_analysis/v1", "value": {"policy": "skip", "comment": "we use gosec for sast scanning. See attached gosec-report resource."}}]' "${descriptor_path}"
 fi
+if [[ "$(yq '.component.resources[] | select(.name == "gosec-report-mcm") | .name' "${descriptor_path}")" == "gosec-report-mcm" ]]; then
+  yq -i '(.component.sources[] | select(.name == "machine-controller-manager-provider-gdc")).labels += [{"name": "cloud.gardener.cnudie/dso/scanning-hints/source_analysis/v1", "value": {"policy": "skip", "comment": "we use gosec for sast scanning. See attached gosec-report-mcm resource."}}]' "${descriptor_path}"
+fi
+if [[ "$(yq '.component.resources[] | select(.name == "gosec-report-ccm") | .name' "${descriptor_path}")" == "gosec-report-ccm" ]]; then
+  yq -i '(.component.sources[] | select(.name == "cloud-provider-gdc")).labels += [{"name": "cloud.gardener.cnudie/dso/scanning-hints/source_analysis/v1", "value": {"policy": "skip", "comment": "we use gosec for sast scanning. See attached gosec-report-ccm resource."}}]' "${descriptor_path}"
+fi
 tar czf "${archive_path}" -C "$(dirname "${descriptor_path}")" component-descriptor.yaml

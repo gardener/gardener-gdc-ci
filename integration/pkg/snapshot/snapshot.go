@@ -41,7 +41,7 @@ import (
 // uploadFile allows overriding the GCS upload function for hermetic unit testing.
 var uploadFile = gcs.UploadFile
 
-const defaultDirPermissions = 0755
+const defaultDirPermissions = 0750
 
 // DestinationConfig defines the destination bucket and directory prefix for uploading generated snapshots.
 type DestinationConfig struct {
@@ -198,8 +198,8 @@ func capturePodLogs(ctx context.Context, clientset kubernetes.Interface, ns stri
 			}
 			defer podLogs.Close()
 
-			logFilePath := filepath.Join(resDir, fmt.Sprintf("%s-%s.log", pod.Name, containerName))
-			logFile, err := os.Create(logFilePath)
+			logFilePath := filepath.Clean(filepath.Join(resDir, fmt.Sprintf("%s-%s.log", pod.Name, containerName)))
+			logFile, err := os.Create(logFilePath) // #nosec G304 -- controlled snapshot output path
 			if err != nil {
 				return fmt.Errorf("failed to create log file %s: %w", logFilePath, err)
 			}
@@ -261,7 +261,7 @@ func saveYAML(path string, obj interface{}) error {
 // It is a package-level variable to allow mocking in tests.
 var createArchive = func(srcDir, archivePath string) error {
 	// Create the destination output file for the archive.
-	destFile, err := os.Create(archivePath)
+	destFile, err := os.Create(filepath.Clean(archivePath)) // #nosec G304 -- controlled snapshot archive destination path
 	if err != nil {
 		return fmt.Errorf("failed to create destination file: %w", err)
 	}
@@ -324,7 +324,7 @@ var createArchive = func(srcDir, archivePath string) error {
 		// Wrap file opening and copying in an anonymous function to ensure
 		// file descriptors are closed immediately via defer, preventing leaks.
 		if err := func() error {
-			file, err := os.Open(path)
+			file, err := os.Open(filepath.Clean(path)) // #nosec G304 -- walked path inside controlled snapshot directory
 			if err != nil {
 				return fmt.Errorf("failed to open file %s: %w", path, err)
 			}

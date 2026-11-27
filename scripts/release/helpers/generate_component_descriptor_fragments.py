@@ -16,6 +16,19 @@ CERTIFICATION_LABEL = {
     "value": ["release", "e2e-certification"],
 }
 
+LOCAL_IMAGE_CVE_CATEGORISATION_LABEL = {
+    "name": "gardener.cloud/cve-categorisation",
+    "value": {
+        "network_exposure": "protected",
+        "authentication_enforced": False,
+        "user_interaction": "gardener-operator",
+        "confidentiality_requirement": "high",
+        "integrity_requirement": "high",
+        "availability_requirement": "low",
+    },
+    "signing": False,
+}
+
 LOCAL_IMAGE_NAMES = {
     "gardener-extension-provider-gdch",
     "gardener-extension-admission-gdch",
@@ -62,6 +75,8 @@ def image_resource(image: Dict[str, str]) -> Dict[str, Any]:
     name = image["component"]
     version = image["version"]
     labels = resource_labels()
+    if name in LOCAL_IMAGE_NAMES:
+        labels.append(LOCAL_IMAGE_CVE_CATEGORISATION_LABEL)
     return {
         "name": name,
         "version": version,

@@ -21,11 +21,12 @@ export PATH   := $(abspath $(TOOLS_BIN_DIR)):$(PATH)
 GOIMPORTS      := $(TOOLS_BIN_DIR)/goimports
 GOLANGCI_LINT  := $(TOOLS_BIN_DIR)/golangci-lint
 
+GOIMPORTS_VERSION     ?= v0.52.0
 GOLANGCI_LINT_VERSION ?= v2.1.6
 
 $(GOIMPORTS):
 	@mkdir -p $(TOOLS_BIN_DIR)
-	GOBIN=$(abspath $(TOOLS_BIN_DIR)) go install golang.org/x/tools/cmd/goimports@latest
+	GOBIN=$(abspath $(TOOLS_BIN_DIR)) go install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
 
 $(GOLANGCI_LINT):
 	@mkdir -p $(TOOLS_BIN_DIR)
@@ -92,6 +93,9 @@ unittests:
 	@python3 ./scripts/release/update_dashboard_test.py
 	@python3 ./scripts/release/helpers/generate_release_notes_test.py
 	@python3 ./scripts/release/helpers/generate_component_descriptor_fragments_test.py
+	@python3 ./scripts/release/helpers/policy_check_test.py
+	@python3 ./scripts/release/helpers/policy_check.py --ci-repo .
+	@python3 ./scripts/release/security_scan_test.py
 
 .PHONY: help
 help: ## Display available targets

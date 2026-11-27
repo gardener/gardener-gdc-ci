@@ -61,12 +61,14 @@ on:
         required: false
         default: true
         type: boolean
+      enforce_security_gate:
+        description: 'Enforce blocking security gate (gosec, govulncheck, Trivy image & Helm config scans) on candidate artifacts'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
-  contents: write
-  packages: write
-  pages: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: gardener-gdc-release-pipeline-${{ github.ref }}
@@ -99,6 +101,11 @@ jobs:
     needs: authorize
     if: needs.authorize.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      pages: write
+      id-token: write
     environment: gdc-staging
     concurrency:
       group: gardener-gdc-staging-env
@@ -116,6 +123,8 @@ jobs:
       SKIP_CONFORMANCE: ${{ inputs.skip_conformance || 'false' }}
       GDC_RELEASE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDC_RELEASE_SERVICE_ACCOUNT_KEY }}
       GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON: ${{ secrets.GDC_RELEASE_HARBOR_DOCKER_CONFIG_JSON }}
+      # Optional PEM CA for labs whose console certificate is not publicly trusted.
+      GDC_BOOTSTRAP_CA_PEM: ${{ vars.GDC_BOOTSTRAP_CA_PEM }}
     steps:
       - name: Checkout gardener-gdc-ci
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -166,6 +175,20 @@ jobs:
       - name: Stage 1 - Build & Push Candidate Artifacts to GHCR
         id: stage_build
         run: ./scripts/release/1-build_and_push_artifacts.sh
+
+      - name: Stage 1b - Automated Security Gate (SAST, Dependencies, Images & Helm Charts)
+        id: stage_security_scan
+        env:
+          ENFORCE_SECURITY_GATE: ${{ github.event_name == 'schedule' && 'true' || (inputs.enforce_security_gate == false && 'false' || 'true') }}
+        run: ./scripts/release/helpers/security_scan.sh
+
+      - name: Upload Security Scan Reports (SARIF & Trivy JSON)
+        if: always() && steps.stage_build.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gdc-security-scan-reports
+          path: /tmp/gardener-gdc-release/artifacts/security
+          if-no-files-found: ignore
 
       - name: Stage 2 - Prepare Pipeline Configuration & Bootstrap GDC CLI
         id: stage_prepare
@@ -225,6 +248,8 @@ jobs:
           EXTENSION_SOURCE_DIR: /tmp/gardener-gdc-release/src/gardener-extension-provider-gdc
           RELEASE_NOTES_FILE: /tmp/gardener-gdc-release/gdc-release-notes.md
           GOSEC_REPORT_FILE: /tmp/gardener-gdc-release/artifacts/gosec-report.sarif
+          GOSEC_MCM_REPORT_FILE: /tmp/gardener-gdc-release/artifacts/gosec-report-mcm.sarif
+          GOSEC_CCM_REPORT_FILE: /tmp/gardener-gdc-release/artifacts/gosec-report-ccm.sarif
         run: |
           set -euo pipefail
           # No-change official runs reuse the existing component version and descriptor.
@@ -268,6 +293,16 @@ jobs:
             echo "sast=true" >> "${GITHUB_OUTPUT}"
           else
             echo "sast=false" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -s "${GOSEC_MCM_REPORT_FILE}" ]]; then
+            echo "sast_mcm=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "sast_mcm=false" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -s "${GOSEC_CCM_REPORT_FILE}" ]]; then
+            echo "sast_ccm=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "sast_ccm=false" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Create OCM Base Component Descriptor
@@ -355,6 +390,70 @@ jobs:
                     we use gosec (linter) for SAST scans
                     see: https://github.com/securego/gosec
 
+      - name: Attach Subcomponent gosec SAST Reports as OCM Fragments
+        id: ocm_subcomponent_sast
+        if: steps.ocm_inputs.outcome == 'success' && (steps.ocm_inputs.outputs.sast_mcm == 'true' || steps.ocm_inputs.outputs.sast_ccm == 'true')
+        run: |
+          mkdir -p /tmp/gardener-gdc-release/blobs.d
+          cat /dev/null > /tmp/gardener-gdc-release/ocm-subcomponent-sast.yaml
+          if [[ "${{ steps.ocm_inputs.outputs.sast_mcm }}" == "true" ]]; then
+            tar czf /tmp/gardener-gdc-release/blobs.d/gosec-report-mcm.tar.gz \
+              -C /tmp/gardener-gdc-release/artifacts gosec-report-mcm.sarif
+            cat >> /tmp/gardener-gdc-release/ocm-subcomponent-sast.yaml <<'EOF'
+          - name: gosec-report-mcm
+            relation: local
+            access:
+              type: localBlob
+              localReference: gosec-report-mcm.tar.gz
+            srcRefs:
+              - identitySelector:
+                  name: machine-controller-manager-provider-gdc
+            labels:
+              - name: gardener.cloud/purposes
+                value:
+                  - lint
+                  - sast
+                  - gosec
+              - name: gardener.cloud/comment
+                value: |
+                  we use gosec (linter) for SAST scans
+                  see: https://github.com/securego/gosec
+          EOF
+          fi
+          if [[ "${{ steps.ocm_inputs.outputs.sast_ccm }}" == "true" ]]; then
+            tar czf /tmp/gardener-gdc-release/blobs.d/gosec-report-ccm.tar.gz \
+              -C /tmp/gardener-gdc-release/artifacts gosec-report-ccm.sarif
+            cat >> /tmp/gardener-gdc-release/ocm-subcomponent-sast.yaml <<'EOF'
+          - name: gosec-report-ccm
+            relation: local
+            access:
+              type: localBlob
+              localReference: gosec-report-ccm.tar.gz
+            srcRefs:
+              - identitySelector:
+                  name: cloud-provider-gdc
+            labels:
+              - name: gardener.cloud/purposes
+                value:
+                  - lint
+                  - sast
+                  - gosec
+              - name: gardener.cloud/comment
+                value: |
+                  we use gosec (linter) for SAST scans
+                  see: https://github.com/securego/gosec
+          EOF
+          fi
+
+      - name: Export Subcomponent gosec SAST Reports OCM Fragment
+        id: ocm_subcomponent_sast_export
+        if: steps.ocm_subcomponent_sast.outcome == 'success'
+        uses: gardener/cc-utils/.github/actions/export-ocm-fragments@bce63f62928717a11f610ec8022af9feb497d5df # v1
+        with:
+          ctx: gdc-certified
+          blobs-directory: /tmp/gardener-gdc-release/blobs.d
+          ocm-resources-file: /tmp/gardener-gdc-release/ocm-subcomponent-sast.yaml
+
       - name: Merge OCM Component Descriptor
         id: ocm_merge
         if: steps.ocm_inputs.outcome == 'success' && steps.ocm_inputs.outputs.publish == 'true'
@@ -379,7 +478,7 @@ jobs:
       - name: Upload OCM Component Descriptor Artifact
         id: ocm_artifact
         if: steps.ocm_finalize.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gdc-component-descriptor
           path: /tmp/gardener-gdc-release/ocm/component-descriptor.tar.gz
@@ -433,6 +532,7 @@ jobs:
         env:
           PUBLIC_REGISTRY: ${{ steps.gardener_params.outputs.oci-registry && format('{0}/gardener/gardener-gdc-ci', steps.gardener_params.outputs.oci-registry) || (env.RELEASE_MODE == 'release' && 'europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci' || 'europe-docker.pkg.dev/gardener-project/snapshots/gardener/gardener-gdc-ci') }}
           STAGE_BUILD_STATUS: ${{ steps.stage_build.outcome }}
+          STAGE_SECURITY_SCAN_STATUS: ${{ steps.stage_security_scan.outcome }}
           STAGE_DEPLOY_GARDEN_STATUS: ${{ steps.stage_deploy_garden.outcome }}
           STAGE_DEPLOY_SEED_STATUS: ${{ steps.stage_deploy_seed.outcome }}
           STAGE_DEPLOY_SHOOT_STATUS: ${{ steps.stage_deploy_shoot.outcome }}

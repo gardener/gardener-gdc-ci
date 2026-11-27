@@ -165,6 +165,17 @@ func TestSignJWTWithKey(t *testing.T) {
 	if !ok || time.Unix(int64(exp), 0).Before(time.Now()) {
 		t.Errorf("invalid exp claim: %v", claims["exp"])
 	}
+	if time.Unix(int64(exp), 0).After(time.Now().Add(61 * time.Minute)) {
+		t.Errorf("expected exp <= 1h from now, got %v", time.Unix(int64(exp), 0))
+	}
+	nbf, ok := claims["nbf"].(float64)
+	if !ok || time.Unix(int64(nbf), 0).After(time.Now()) {
+		t.Errorf("invalid nbf claim: %v", claims["nbf"])
+	}
+	jti, ok := claims["jti"].(string)
+	if !ok || len(jti) != 32 {
+		t.Errorf("expected 32-hex-char jti claim, got %v", claims["jti"])
+	}
 }
 
 func TestSignJWTWithKey_InvalidKey(t *testing.T) {

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"cloud.google.com/go/storage"
 )
@@ -39,7 +40,7 @@ func UploadFile(ctx context.Context, options UploadOptions) error {
 	}
 	defer client.Close()
 
-	f, err := os.Open(options.LocalFilePath)
+	f, err := os.Open(filepath.Clean(options.LocalFilePath)) // #nosec G304 -- controlled local snapshot archive path
 	if err != nil {
 		return fmt.Errorf("failed to open file %s: %w", options.LocalFilePath, err)
 	}
@@ -53,7 +54,7 @@ func UploadFile(ctx context.Context, options UploadOptions) error {
 	}
 
 	if _, err := io.Copy(wc, f); err != nil {
-		wc.Close()
+		_ = wc.Close()
 		return fmt.Errorf("failed to stream local file to GCS object: %w", err)
 	}
 

@@ -48,6 +48,17 @@ Navigate to **[Actions → Gardener GDC Release Pipeline](https://github.com/gar
 | `cloud_provider_gdc_ref` | `main` | Git ref (branch, tag, or SHA) for `GoogleCloudPlatform/cloud-provider-gdc` |
 | `skip_conformance` | `false` | Skip the Sonobuoy CNCF conformance suite for faster validation runs |
 | `publish_to_public_registry` | `true` | Publish certified artifacts to the Gardener registry on success |
+| `enforce_security_gate` | `true` | Enforce the Stage 1b blocking security gate on manual runs (always enforced on scheduled runs) |
+
+#### Automated Security Gate (Stage 1b)
+After candidate artifacts are built and pushed to GHCR, Stage 1b scans the target refs before any deployment or publication:
+- **Source SAST (`gosec`)**: fails on any unsuppressed finding across `gardener-extension-provider-gdc`, `machine-controller-manager-provider-gdc`, and `cloud-provider-gdc`.
+- **Go Vulnerability Reachability (`govulncheck`)**: fails on any called vulnerable symbol across production packages in the three GDC component repositories.
+- **Container Images (`trivy image --scanners vuln,secret --ignore-unfixed`)**: fails on any fixable `CRITICAL`, `HIGH`, or `MEDIUM` CVE in the four GDC images, any fixable `CRITICAL` or `HIGH` CVE in `external-dnsman2-gdch`, or any detected secret.
+- **Helm Charts & Dockerfiles (`trivy config`)**: fails on any `CRITICAL` or `HIGH` misconfiguration in the rendered extension charts (`extension-provider`, `extension-admission/charts/application`, `extension-admission/charts/runtime`, `charts/internal/seed-controlplane/charts/cloud-controller-manager`) or the three GDC `Dockerfile`s.
+- **Security Policy & Regression Guards (`scripts/release/helpers/policy_check.py`)**: fails on regressions across all four repositories, including unpinned external `Dockerfile` base images or root runtime users (`DOCKER-PIN-001`), TLS verification bypass flags or `InsecureSkipVerify: true` (`TLS-BYPASS-001`), floating `go install ...@latest` (`GO-TOOL-PIN-001`), long-lived STS assertion JWTs or missing `jti`/`nbf` claims (`JWT-TTL-001`), unquoted/injectable Helm templates including live `helm template` canary rendering (`HELM-QUOTE-001`), insecure Terraform credential file modes (`TF-PERM-001`), OCM SAST skip labels (`OCM-SAST-001`), presubmit CI trust-boundary fallbacks (`CI-TRUST-001`), MCM CA-init shell-quoting or empty-label `ListMachines` regressions (`MCM-INIT-001`), and missing `token_uri` validation (`GDC-AUTH-URI-001`). Open design-level items are tracked in the summary as advisory checks.
+
+Scheduled runs (including the biweekly official release) always enforce the gate. Manual runs from `main` enforce it by default and can bypass findings only by setting `enforce_security_gate=false` (scanner or missing-source errors still record as gate failures). The component repositories must pass these scans on the refs the pipeline builds.
 
 ### 3. GitHub CLI (`gh`)
 ```bash

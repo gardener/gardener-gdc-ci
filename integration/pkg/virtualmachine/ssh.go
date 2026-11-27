@@ -128,7 +128,7 @@ func waitForSSH(ctx context.Context, vmIP, sshKeyPath string, timeout time.Durat
 
 // getSSHConfig creates an ssh.ClientConfig using the private key at sshKeyPath and defaultUser.
 func getSSHConfig(sshKeyPath string) (*ssh.ClientConfig, error) {
-	key, err := os.ReadFile(sshKeyPath)
+	key, err := os.ReadFile(filepath.Clean(sshKeyPath)) // #nosec G304 -- trusted ephemeral test SSH key path
 	if err != nil {
 		return nil, fmt.Errorf("failed to read private key: %w", err)
 	}
@@ -141,7 +141,7 @@ func getSSHConfig(sshKeyPath string) (*ssh.ClientConfig, error) {
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // #nosec G106 -- ephemeral test VM connectivity check over private GDC test network
 		Timeout:         defaultSSHConnectionTimeout,
 	}, nil
 }
@@ -177,7 +177,7 @@ func generateSSHKey(name string) (string, error) {
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("failed to generate RSA key: %w", err)
 	}
 
@@ -188,19 +188,19 @@ func generateSSHKey(name string) (string, error) {
 	privateKeyBytes := pem.EncodeToMemory(privateKeyPEM)
 
 	if err := os.WriteFile(keyPath, privateKeyBytes, 0600); err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("failed to write private key: %w", err)
 	}
 
 	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
 	if err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("failed to generate public key: %w", err)
 	}
 	publicKeyBytes := ssh.MarshalAuthorizedKey(publicKey)
 
-	if err := os.WriteFile(keyPath+".pub", publicKeyBytes, 0644); err != nil {
-		os.RemoveAll(tmpDir)
+	if err := os.WriteFile(keyPath+".pub", publicKeyBytes, 0600); err != nil {
+		_ = os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("failed to write public key: %w", err)
 	}
 
@@ -209,7 +209,7 @@ func generateSSHKey(name string) (string, error) {
 
 // readPublicKey reads the public key from the given path.
 func readPublicKey(keyPath string) (string, error) {
-	pubKeyBytes, err := os.ReadFile(keyPath + ".pub")
+	pubKeyBytes, err := os.ReadFile(filepath.Clean(keyPath + ".pub")) // #nosec G304 -- trusted ephemeral test SSH public key path
 	if err != nil {
 		return "", fmt.Errorf("failed to read public key: %w", err)
 	}

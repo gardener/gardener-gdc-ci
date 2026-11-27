@@ -445,15 +445,16 @@ func GetShootParentSubnetNameForIndex(commitHash string, index int) string {
 // DistributeNodesAcrossZones distributes a Shoot cluster's total node count evenly across its zones.
 // Any remainder (total % numZones) is distributed one node per zone starting from index 0.
 func DistributeNodesAcrossZones(total int32, numZones int) []int32 {
-	if numZones <= 0 {
+	if numZones <= 0 || numZones > 10000 {
 		return nil
 	}
 	counts := make([]int32, numZones)
-	base := total / int32(numZones)
-	rem := total % int32(numZones)
+	numZones32 := int32(numZones) // #nosec G115 -- numZones bounded to (0, 10000] above
+	base := total / numZones32
+	rem := total % numZones32
 	for i := 0; i < numZones; i++ {
 		counts[i] = base
-		if int32(i) < rem {
+		if int32(i) < rem { // #nosec G115 -- i < numZones <= 10000
 			counts[i]++
 		}
 	}
@@ -480,13 +481,13 @@ func writeToFile(pattern string, data []byte) (string, error) {
 	}
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("failed to write to temp file: %w", err)
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpFile.Name())
+		_ = os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("failed to close temp file %s: %w", tmpFile.Name(), err)
 	}
 

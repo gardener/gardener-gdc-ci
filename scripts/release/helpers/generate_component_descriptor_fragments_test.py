@@ -68,7 +68,7 @@ go() {
   case "$1 $2" in
     'mod download') [[ "$FAILURE" != download ]] ;;
     'list -m') [[ "$FAILURE" != list ]] && printf '%s\\n' "$SCAN_DIR" ;;
-    'install github.com/securego/gosec/v2/cmd/gosec@v2.29.0') [[ "$FAILURE" != install ]] ;;
+    'install github.com/securego/gosec/v2/cmd/gosec@v2.30.0') [[ "$FAILURE" != install ]] ;;
     *) return 99 ;;
   esac
 }
@@ -102,7 +102,7 @@ go() {
   case "$1 $2" in
     'mod download') return 0 ;;
     'list -m') printf '%s\\n' "$SCAN_DIR" ;;
-    'install github.com/securego/gosec/v2/cmd/gosec@v2.29.0') return 0 ;;
+    'install github.com/securego/gosec/v2/cmd/gosec@v2.30.0') return 0 ;;
     *) return 99 ;;
   esac
 }
@@ -211,6 +211,10 @@ printf 'release-continues\\n'
             generated_resources = json.loads(resources.read_text(encoding="utf-8"))
             self.assertEqual(len(generated_resources), 4)
             self.assertEqual(generated_resources[0]["relation"], "local")
+            self.assertTrue(any(
+                label["name"] == "gardener.cloud/cve-categorisation"
+                for label in generated_resources[0]["labels"]
+            ))
             self.assertEqual(generated_resources[1]["relation"], "external")
             self.assertEqual(generated_resources[3]["type"], "helmChart")
             self.assertEqual(generated_resources[3]["version"], "1.2.3")

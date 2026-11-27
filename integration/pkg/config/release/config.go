@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
@@ -197,7 +198,7 @@ func LoadReleaseTestConfig(releaseConfigurationFilePath, gardenerArtifactsVersio
 // loadPipelineConfig reads a YAML file from the given path and unmarshals it
 // into a pipelineConfig struct.
 func loadPipelineConfig(releaseConfigurationFilePath string) (*pipelineConfig, error) {
-	yamlFile, err := os.ReadFile(releaseConfigurationFilePath)
+	yamlFile, err := os.ReadFile(filepath.Clean(releaseConfigurationFilePath)) // #nosec G304 -- trusted pipeline configuration path
 	if err != nil {
 		return nil, fmt.Errorf("failed to read YAML file at %s: %w", releaseConfigurationFilePath, err)
 	}
@@ -288,7 +289,9 @@ func DeriveParentCIDR(cidr string) string {
 		return cidr
 	}
 	var thirdOctet int
-	fmt.Sscanf(octets[2], "%d", &thirdOctet)
+	if _, err := fmt.Sscanf(octets[2], "%d", &thirdOctet); err != nil {
+		return cidr
+	}
 	parentThirdOctet := thirdOctet & 0xF0
 	return fmt.Sprintf("%s.%s.%d.0/20", octets[0], octets[1], parentThirdOctet)
 }

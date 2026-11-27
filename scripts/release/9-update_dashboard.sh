@@ -29,6 +29,7 @@ RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-gardener/
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 STAGE_BUILD="${STAGE_BUILD_STATUS:-unknown}"
+STAGE_SECURITY_SCAN="${STAGE_SECURITY_SCAN_STATUS:-skipped}"
 STAGE_DEPLOY_GARDEN="${STAGE_DEPLOY_GARDEN_STATUS:-unknown}"
 STAGE_DEPLOY_SEED="${STAGE_DEPLOY_SEED_STATUS:-unknown}"
 STAGE_DEPLOY_SHOOT="${STAGE_DEPLOY_SHOOT_STATUS:-unknown}"
@@ -395,6 +396,7 @@ EOF
 | Stage | Status |
 | :--- | :--- |
 | 1. Build & Push Candidate Artifacts (GHCR) | \`${STAGE_BUILD}\` |
+| 1b. Automated Security Gate (SAST, Vulns, Images, Helm) | \`${STAGE_SECURITY_SCAN}\` |
 | 3. Deploy Virtual Garden (\`garden\`) | \`${STAGE_DEPLOY_GARDEN}\` |
 | 4. Deploy GDC Seed (\`seed\`) | \`${STAGE_DEPLOY_SEED}\` |
 | 5. Provision GDC Shoot (\`shoot\`) | \`${STAGE_DEPLOY_SHOOT}\` |

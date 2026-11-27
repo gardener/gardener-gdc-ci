@@ -24,6 +24,7 @@ const (
 	DefaultCandidateRegistryURL = "ghcr.io/gardener/gardener-gdc-ci"
 
 	// GDCCredentialsSecretName is the name of the secret containing the GDC credentials.
+	// #nosec G101 -- Kubernetes Secret resource name, not a hardcoded credential
 	GDCCredentialsSecretName = "gdch-cred"
 
 	// CommitHashAnnotation is the annotation used to identify the Garden or Shoot cluster to be used for the test run.

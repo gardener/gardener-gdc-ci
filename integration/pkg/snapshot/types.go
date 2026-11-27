@@ -17,6 +17,7 @@ package snapshot
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v2"
@@ -71,7 +72,7 @@ type MultiClusterSnapshotResources struct {
 
 // LoadSnapshotResources reads and parses the MultiClusterSnapshotResources configuration from a YAML file path.
 func LoadSnapshotResources(filePath string) (*MultiClusterSnapshotResources, error) {
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filepath.Clean(filePath)) // #nosec G304 -- trusted snapshot resources config path
 	if err != nil {
 		return nil, fmt.Errorf("failed to read snapshot resources file: %w", err)
 	}

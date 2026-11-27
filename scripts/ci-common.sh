@@ -161,12 +161,27 @@ setup_gdc_credentials() {
     exit 1
   fi
 
+  # The console certificate is verified against the system trust store. Labs
+  # whose console certificate is issued by a private CA provide that CA as PEM
+  # text in GDC_BOOTSTRAP_CA_PEM.
+  local bootstrap_ca_file=""
+  if [[ -n "${GDC_BOOTSTRAP_CA_PEM:-}" ]]; then
+    bootstrap_ca_file="$(mktemp /tmp/gdc-bootstrap-ca-XXXXXX.pem)"
+    (
+      umask 077
+      printf '%s\n' "${GDC_BOOTSTRAP_CA_PEM}" > "${bootstrap_ca_file}"
+    )
+  fi
+
   echo "Fetching GDC Root CA from ${console_url}/.well-known/certificate-authority..."
   if ! wget "${console_url}/.well-known/certificate-authority" \
-    --no-check-certificate -q -O "${ca_file}"; then
+    ${bootstrap_ca_file:+"--ca-certificate=${bootstrap_ca_file}"} -q -O "${ca_file}" || \
+     [[ ! -s "${ca_file}" ]]; then
+    rm -f "${bootstrap_ca_file}"
     echo "::error::Failed to fetch GDC Root CA from ${console_url}" >&2
     exit 1
   fi
+  rm -f "${bootstrap_ca_file}"
 }
 
 # install_gdcloud_cli downloads and installs the gdcloud CLI and
@@ -188,7 +203,8 @@ install_gdcloud_cli() {
     echo "gdcloud CLI already installed at ${gdcloud_root}/bin/gdcloud"
     if [[ ! -d "${gdcloud_root}/plugins" || ! -w "${gdcloud_root}/plugins" ]]; then
       ${sudo_cmd} mkdir -p "${gdcloud_root}/plugins"
-      ${sudo_cmd} chmod 0777 "${gdcloud_root}/plugins"
+      ${sudo_cmd} chown "$(id -u):$(id -g)" "${gdcloud_root}/plugins" 2>/dev/null || true
+      ${sudo_cmd} chmod 0755 "${gdcloud_root}/plugins"
     fi
     export PATH="${gdcloud_root}/bin:${PATH}"
     export GDCLOUD_PATH="${gdcloud_root}/bin/gdcloud"
@@ -199,6 +215,11 @@ install_gdcloud_cli() {
       echo "GDCLOUD_PATH=${GDCLOUD_PATH}" >> "${GITHUB_ENV}"
     fi
     return 0
+  fi
+
+  if [[ ! -s "${ca_file}" ]]; then
+    echo "::error::GDC Root CA bundle '${ca_file}' is missing or empty; refusing to query ${mgmt_url} without TLS verification." >&2
+    exit 1
   fi
 
   echo "Minting STS token using GDC ServiceAccount to query CLIBundleMetadata..."
@@ -214,11 +235,27 @@ install_gdcloud_cli() {
       --ca-cert-file="${ca_file}" \
       --audience="${mgmt_url}")
   fi
+  mask_secret_value "${sts_token}"
+
+  local auth_hdr_file
+  auth_hdr_file="$(mktemp /tmp/gdc-auth-hdr-XXXXXX)"
+  (
+    umask 077
+    printf 'Authorization: Bearer %s\n' "${sts_token}" > "${auth_hdr_file}"
+  )
 
   echo "Resolving gdcloud CLI bundle URL (version: ${gdcloud_version:-latest}) from ${mgmt_url}..."
-  local serving_url
-  serving_url=$(curl -ksSL -H "Authorization: Bearer ${sts_token}" \
-    "${mgmt_url}/apis/artifactview.private.gdc.goog/v1alpha1/namespaces/ui-system/clibundlemetadata" | \
+  local clibundle_json serving_url
+  if ! clibundle_json=$(curl --cacert "${ca_file}" --proto '=https' --proto-redir '=https' \
+    -sSL --fail -H "@${auth_hdr_file}" \
+    "${mgmt_url}/apis/artifactview.private.gdc.goog/v1alpha1/namespaces/ui-system/clibundlemetadata"); then
+    rm -f "${auth_hdr_file}"
+    echo "::error::Failed to query CLIBundleMetadata from ${mgmt_url}." >&2
+    exit 1
+  fi
+  rm -f "${auth_hdr_file}"
+
+  serving_url=$(printf '%s' "${clibundle_json}" | \
     jq -r --arg ver "${gdcloud_version}" '
       [.items[]
        | select(.platform.os == "linux" and .platform.architecture == "amd64")
@@ -236,13 +273,15 @@ install_gdcloud_cli() {
 
   local tarball="/tmp/gdcloud_cli_linux.tar.gz"
   echo "Downloading gdcloud CLI from ${serving_url}..."
-  curl -kL --fail --retry 3 "${serving_url}?uncompressed=false" -o "${tarball}"
+  curl --cacert "${ca_file}" --proto '=https' --proto-redir '=https' \
+    -L --fail --retry 3 "${serving_url}?uncompressed=false" -o "${tarball}"
 
   echo "Extracting gdcloud CLI to /usr/local/bin and installing gdcloud-k8s-auth-plugin..."
   ${sudo_cmd} tar -xzf "${tarball}" -C /usr/local/bin/
   ${sudo_cmd} "${gdcloud_root}/bin/gdcloud" components install gdcloud-k8s-auth-plugin
   ${sudo_cmd} mkdir -p "${gdcloud_root}/plugins"
-  ${sudo_cmd} chmod 0777 "${gdcloud_root}/plugins"
+  ${sudo_cmd} chown "$(id -u):$(id -g)" "${gdcloud_root}/plugins" 2>/dev/null || true
+  ${sudo_cmd} chmod 0755 "${gdcloud_root}/plugins"
   rm -f "${tarball}"
 
   export PATH="${gdcloud_root}/bin:${PATH}"

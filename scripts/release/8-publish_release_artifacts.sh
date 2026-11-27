@@ -49,8 +49,11 @@ CCM_REPO="$(yq -r '.components.cloudProviderGDC.repository' "${RELEASE_METADATA_
 CCM_REF="$(yq -r '.components.cloudProviderGDC.ref' "${RELEASE_METADATA_FILE}")"
 EXT_CHART_VERSION="${EXTENSION_GDC_ARTIFACTS_VERSION#v}"
 
-# Optional OCM attachments must belong to this run, including local reruns.
-rm -f "${RELEASE_WORK_DIR}/gdc-release-notes.md" "${RELEASE_ARTIFACTS_DIR}/gosec-report.sarif"
+# Optional OCM release-notes attachment must belong to this run; preserve Stage 1b SAST SARIFs if present.
+rm -f "${RELEASE_WORK_DIR}/gdc-release-notes.md"
+if [[ "${RELEASE_MODE}" == "release" ]]; then
+  rm -f "${RELEASE_ARTIFACTS_DIR}/gosec-report.sarif"
+fi
 
 IMAGES=()
 
@@ -342,7 +345,7 @@ tag_and_bump_gdc_repository() {
 run_gosec_sast_scan() {
   local src_dir="$1"
   local report_out="$2"
-  local gosec_version="v2.29.0"
+  local gosec_version="v2.30.0"
   local gosec_bin_dir="${RELEASE_WORK_DIR}/sast-bin"
 
   # Resolve dependencies before locating the module's scan script or running gosec.

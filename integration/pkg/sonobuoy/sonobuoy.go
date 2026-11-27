@@ -37,7 +37,7 @@ func Exec(args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot locate sonobuoy binary: %w", err)
 	}
-	cmd := exec.Command(executable, args...)
+	cmd := exec.Command(executable, args...) // #nosec G204 -- intentional Sonobuoy conformance CLI wrapper
 	result, err := cmd.CombinedOutput()
 	if err != nil {
 		return result, fmt.Errorf("cannot execute sonobuoy command: %w", err)

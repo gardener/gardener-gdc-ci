@@ -65,7 +65,7 @@ func NewTestingClient(caDataPath, serviceaccountPath string, consoleURL string) 
 			if setSSLCertFile {
 				restoreSSLCertFile(prevSSLCertFile, hadSSLCertFile)
 			}
-			os.RemoveAll(configDir)
+			_ = os.RemoveAll(configDir)
 		}
 	}()
 
@@ -105,7 +105,7 @@ func buildCABundle(configDir, caDataPath string) string {
 	if caDataPath == "" {
 		return ""
 	}
-	gdcCA, err := os.ReadFile(caDataPath)
+	gdcCA, err := os.ReadFile(filepath.Clean(caDataPath)) // #nosec G304 -- trusted CA certificate path
 	if err != nil {
 		return caDataPath
 	}
@@ -119,8 +119,8 @@ func buildCABundle(configDir, caDataPath string) string {
 	}
 	combined = append(combined, gdcCA...)
 
-	bundlePath := filepath.Join(configDir, "ca-bundle.crt")
-	if err := os.WriteFile(bundlePath, combined, 0600); err != nil {
+	bundlePath := filepath.Clean(filepath.Join(configDir, "ca-bundle.crt"))
+	if err := os.WriteFile(bundlePath, combined, 0600); err != nil { // #nosec G304,G703 -- configDir is created by os.MkdirTemp
 		return caDataPath
 	}
 	return bundlePath
@@ -150,7 +150,7 @@ func restoreSSLCertFile(prev string, hadPrev bool) {
 // gdcloud is installed under /usr/local/bin by root).
 func (c *TestingClient) resolvePluginsDir(executable string) string {
 	if envDir := os.Getenv("GDCLOUD_PLUGINS_BASE_DIR"); envDir != "" {
-		_ = os.MkdirAll(envDir, 0755)
+		_ = os.MkdirAll(filepath.Clean(envDir), 0750) // #nosec G703 -- trusted plugins base dir from environment
 		return ""
 	}
 	if hasWritableDefaultPluginsDir(executable) {
@@ -163,7 +163,7 @@ func (c *TestingClient) resolvePluginsDir(executable string) string {
 		return ""
 	}
 	pluginsDir := filepath.Join(c.configDir, "plugins")
-	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+	if err := os.MkdirAll(pluginsDir, 0750); err != nil {
 		return ""
 	}
 	return pluginsDir
@@ -224,7 +224,7 @@ func (c *TestingClient) Exec(args ...string) ([]byte, error) {
 
 	var result []byte
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		cmd := exec.Command(executable, args...)
+		cmd := exec.Command(executable, args...) // #nosec G204 -- intentional hermetic gdcloud CLI wrapper
 		// Override HOME and XDG_CONFIG_HOME to guarantee hermetic testing.
 		// This forces gdcloud to write its configuration to our isolated test directory
 		// instead of mutating the global ~/.config/gdcloud state. We override both

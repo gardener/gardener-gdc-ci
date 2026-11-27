@@ -336,6 +336,7 @@ var getGKEClusterClients = func(userClusters []config.RuntimeClusterConfig) (map
 // builds a Kubernetes client config, and creates a new client with that config.
 func getGKEUserClusterClient(zone, project, name string, schema *runtime.Scheme) (client.WithWatch, error) {
 	kubeconfigPath := fmt.Sprintf("/tmp/%s-kubeconfig", name)
+	// #nosec G204 -- trusted gcloud CLI invocation with configured GKE cluster identifiers
 	cmd := exec.Command("gcloud", "container", "clusters", "get-credentials", name, "--region", zone, "--project", project)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("KUBECONFIG=%s", kubeconfigPath))
 	output, err := cmd.CombinedOutput()

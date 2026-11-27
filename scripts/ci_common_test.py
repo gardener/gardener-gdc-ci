@@ -103,6 +103,70 @@ class CICommonRetryTest(unittest.TestCase):
                 self.assertEqual(int(f.read().strip()), 3)
             self.assertIn("::error::Command failed after 3 attempt(s) (exit 42)", res.stderr)
 
+    def test_ci_common_does_not_use_world_writable_plugin_permissions(self):
+        with open(CI_COMMON_SH, encoding="utf-8") as f:
+            content = f.read()
+        self.assertNotIn("chmod 0777", content)
+        self.assertNotIn("--no-check-certificate", content)
+        self.assertNotIn("(-k)", content)
+        self.assertIn('--cacert "${ca_file}"', content)
+        self.assertIn("--proto '=https' --proto-redir '=https'", content)
+
+    def test_setup_gdc_credentials_verifies_tls_and_supports_bootstrap_ca(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = os.path.join(tmpdir, "bin")
+            os.makedirs(bin_dir)
+            args_log = os.path.join(tmpdir, "wget-args.txt")
+            ca_copy = os.path.join(tmpdir, "bootstrap-ca-seen.pem")
+            mock_wget = os.path.join(bin_dir, "wget")
+            with open(mock_wget, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    f'printf "%s\\n" "$@" > "{args_log}"\n'
+                    'out=""\n'
+                    'for arg in "$@"; do\n'
+                    '  case "${arg}" in\n'
+                    f'    --ca-certificate=*) cp "${{arg#--ca-certificate=}}" "{ca_copy}" ;;\n'
+                    '  esac\n'
+                    'done\n'
+                    'while [[ $# -gt 0 ]]; do\n'
+                    '  if [[ "$1" == "-O" ]]; then out="$2"; shift 2; else shift; fi\n'
+                    'done\n'
+                    'printf "FAKE-CA\\n" > "${out}"\n'
+                )
+            os.chmod(mock_wget, stat.S_IRWXU)
+
+            sa_file = os.path.join(tmpdir, "sa.json")
+            ca_file = os.path.join(tmpdir, "ca.crt")
+            res = self._run_bash(
+                f'setup_gdc_credentials "{sa_file}" "{ca_file}" "https://console.example.test" \'{{"name":"sa"}}\'',
+                extra_env={
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "GDC_BOOTSTRAP_CA_PEM": "-----BEGIN CERTIFICATE-----\nBOOT\n-----END CERTIFICATE-----",
+                },
+            )
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+            with open(args_log, encoding="utf-8") as f:
+                args = f.read()
+            self.assertNotIn("--no-check-certificate", args)
+            self.assertIn("--ca-certificate=", args)
+            with open(ca_copy, encoding="utf-8") as f:
+                self.assertIn("BOOT", f.read())
+
+    def test_install_gdcloud_cli_fails_without_ca_bundle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sa_file = os.path.join(tmpdir, "sa.json")
+            ca_file = os.path.join(tmpdir, "empty-ca.crt")
+            with open(sa_file, "w", encoding="utf-8") as f:
+                f.write('{"name":"sa"}')
+            open(ca_file, "w", encoding="utf-8").close()
+
+            res = self._run_bash(
+                f'install_gdcloud_cli "{sa_file}" "{ca_file}" "https://mgmt.example.test"',
+            )
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("missing or empty", res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
